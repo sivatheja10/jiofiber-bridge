@@ -217,17 +217,22 @@ Reload: `asterisk -rx 'core reload'`.
 
 Instead of ringing every phone at once, you can answer with a menu ("press 1 for …, press 2 for …") and route by keypress. Use `asterisk/extensions-ivr.conf` as a drop-in replacement for the `[from-jio]` block, add a `4001` endpoint (already templated in `pjsip.conf`), and record a prompt.
 
-Record the menu prompt as an **8 kHz mono, 16-bit PCM WAV** and place it at `/var/lib/asterisk/sounds/en/custom/menu.wav` (referenced in the dialplan as `custom/menu`). Any TTS works, but the WAV must be **canonical** — the `data` chunk immediately after `fmt `. Asterisk's WAV reader rejects files with extra header chunks (notably the `FLLR` filler chunk that macOS `afconvert` inserts → `ast_streamfile failed`). Use `ffmpeg` (writes a clean header), for example on macOS:
+Record the menu prompt as an **8 kHz mono, 16-bit PCM WAV**. Two things bite here — both cost a silent caller before you notice:
+
+**1. The WAV must be canonical** — the `data` chunk immediately after `fmt `. Asterisk's reader rejects extra header chunks (macOS `afconvert` inserts an `FLLR` filler chunk; `ffmpeg` adds a `LIST/INFO` chunk unless you pass `-fflags +bitexact`). `sox` reliably writes a clean header. Verify with `asterisk -rx 'file convert menu.wav /tmp/t.ulaw'` — it must exit 0.
 
 ```bash
 say -v Samantha -o menu.aiff "To speak with Alex, press 1. To speak with the family, press 2."
-ffmpeg -i menu.aiff -ar 8000 -ac 1 -c:a pcm_s16le menu.wav
-scp menu.wav root@<VPS>:/var/lib/asterisk/sounds/en/custom/menu.wav
+sox menu.aiff -b 16 -e signed-integer -r 8000 -c 1 menu.wav
 ```
 
-If a prompt still won't play, re-encode it on the server with `sox`, which cleans the header:
-`sox menu.wav -b 16 -e signed-integer -r 8000 -c 1 clean.wav && mv clean.wav menu.wav`. Verify with
-`asterisk -rx 'file convert .../menu.wav /tmp/t.ulaw'` — it must succeed.
+**2. Put the file where Asterisk actually resolves it — or use an absolute path.** The `custom/` sounds prefix and the language-prefix search depend on `astdatadir`, which is distro-specific (`core show settings | grep -i 'data directory'` — often `/usr/share/asterisk`, with `sounds/custom` symlinked to `/usr/local/share/asterisk/sounds`). The foolproof approach is to reference the prompt by **absolute path** in the dialplan, which skips all sounds-dir/language resolution:
+
+```
+same => n(menu),Background(/usr/local/share/asterisk/sounds/menu)   ; no extension
+```
+
+Drop `menu.wav` at that path (`chown asterisk`) and you're done. (`asterisk/extensions-ivr.conf` uses this absolute-path form.)
 
 The IVR **answers** the call to play the menu — that's expected (the caller hears the menu, not ringback). DTMF from the caller reaches Asterisk over the same RFC 4733 relay path the bridge already uses, so digit collection works on live PSTN callers. `dtmf_mode=rfc4733` must be set on the trunk (it is in the template).
 
