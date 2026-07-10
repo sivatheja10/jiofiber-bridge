@@ -1,0 +1,15 @@
+[Unit]
+Description=JioFiber SIP bridge (B2BUA -> JUICE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# unshare --uts gives the process its own hostname (the device identity) without changing the host's.
+ExecStart=/usr/bin/unshare --uts /opt/jiofiber-bridge/scripts/register.sh
+Restart=always
+RestartSec=20
+User=root
+
+[Install]
+WantedBy=multi-user.target

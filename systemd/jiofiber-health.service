@@ -1,0 +1,7 @@
+[Unit]
+Description=JioFiber bridge health check + self-heal
+After=jiofiber-bridge.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jiofiber-bridge/scripts/healthcheck.sh

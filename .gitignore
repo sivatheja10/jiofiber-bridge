@@ -1,0 +1,13 @@
+# Real secrets / local config — never commit
+bridge.env
+asterisk/*.local.conf
+
+# Build artifacts
+bin/
+*.o
+*.so
+jio_b2bua
+
+# Editor noise
+*.swp
+.DS_Store

@@ -1,0 +1,58 @@
+# pjproject patches for JioFiber JUICE
+#
+# Apply on top of JFC-pjproject (github.com/JFC-Group/JFC-pjproject), which already
+# carries the 3 rfc5626 instance-id commits. These 3 additional patches are what make
+# calls actually stable on JUICE. Apply with:  git apply pjproject-jiofiber.patch
+#
+# 1) opencore_amr.c: advertise the AMR `mode-set` in our SDP answer. JUICE fires mid-call
+#    re-INVITEs demanding mode-set be echoed; without this, calls drop after ~1-2 min with
+#    a misleading "Session released - due to de-registration by user" (cause=500).
+#
+# 2) pjsua_acc.c init_outbound_setting: use the `<00000000-0000-1000-8000-0000XXXXXXXX>`
+#    instance-id shape JUICE expects (matches the router's uuid_value).
+#
+# 3) pjsua_acc.c pjsua_acc_create_uac_contact: GUARD the rfc5626 instprm append. Without the
+#    guard it re-appends to contact_params on EVERY outbound call, growing the Contact header
+#    until it overflows (PJ_ETOOSMALL) and outbound fails after N calls.
+
+diff --git a/pjmedia/src/pjmedia-codec/opencore_amr.c b/pjmedia/src/pjmedia-codec/opencore_amr.c
+--- a/pjmedia/src/pjmedia-codec/opencore_amr.c
++++ b/pjmedia/src/pjmedia-codec/opencore_amr.c
+@@ -438,9 +438,13 @@ static pj_status_t amr_default_attr( pjmedia_codec_factory *factory,
+     attr->setting.plc = 1;
+
+     if (def_config[idx].octet_align) {
+-        attr->setting.dec_fmtp.cnt = 1;
++        attr->setting.dec_fmtp.cnt = 2;
+         attr->setting.dec_fmtp.param[0].name = pj_str("octet-align");
+         attr->setting.dec_fmtp.param[0].val = pj_str("1");
++        /* JioFiber JUICE re-INVITEs demand mode-set echoed; advertise all modes */
++        attr->setting.dec_fmtp.param[1].name = pj_str("mode-set");
++        attr->setting.dec_fmtp.param[1].val = (idx==IDX_AMR_NB)?
++            pj_str("0,1,2,3,4,5,6,7") : pj_str("0,1,2,3,4,5,6,7,8");
+     }
+
+     /* Default all other flag bits disabled. */
+
+diff --git a/pjsip/src/pjsua-lib/pjsua_acc.c b/pjsip/src/pjsua-lib/pjsua_acc.c
+--- a/pjsip/src/pjsua-lib/pjsua_acc.c
++++ b/pjsip/src/pjsua-lib/pjsua_acc.c
+@@ -173,7 +173,7 @@ static void init_outbound_setting(pjsua_acc *acc)
+         const pj_str_t *hostname;
+         pj_uint32_t hval;
+         pj_size_t pos;
+-        char instprm[] = ";+sip.instance=\"<00000000-0000-0000-0000-0000CCDDEEFF>\"";
++        char instprm[] = ";+sip.instance=\"<00000000-0000-1000-8000-0000CCDDEEFF>\"";
+
+         hostname = pj_gethostname();
+         pos = pj_ansi_strlen(instprm) - 10;
+@@ -3833,7 +3833,8 @@ PJ_DEF(pj_status_t) pjsua_acc_create_uac_contact( pj_pool_t *pool,
+         transport_param[0] = '\0';
+     }
+
+-    if (acc->cfg.use_rfc5626) {
++    if (acc->cfg.use_rfc5626 &&
++        pj_strstr(&acc->cfg.contact_params, &acc->rfc5626_instprm)==NULL) {
+         pj_ssize_t new_len;
+         pj_str_t new_prm;
+
