@@ -217,13 +217,17 @@ Reload: `asterisk -rx 'core reload'`.
 
 Instead of ringing every phone at once, you can answer with a menu ("press 1 for …, press 2 for …") and route by keypress. Use `asterisk/extensions-ivr.conf` as a drop-in replacement for the `[from-jio]` block, add a `4001` endpoint (already templated in `pjsip.conf`), and record a prompt.
 
-Record the menu prompt as an **8 kHz mono, 16-bit PCM WAV** and place it at `/var/lib/asterisk/sounds/en/custom/menu.wav` (referenced in the dialplan as `custom/menu`). Any TTS works; for example on macOS:
+Record the menu prompt as an **8 kHz mono, 16-bit PCM WAV** and place it at `/var/lib/asterisk/sounds/en/custom/menu.wav` (referenced in the dialplan as `custom/menu`). Any TTS works, but the WAV must be **canonical** — the `data` chunk immediately after `fmt `. Asterisk's WAV reader rejects files with extra header chunks (notably the `FLLR` filler chunk that macOS `afconvert` inserts → `ast_streamfile failed`). Use `ffmpeg` (writes a clean header), for example on macOS:
 
 ```bash
 say -v Samantha -o menu.aiff "To speak with Alex, press 1. To speak with the family, press 2."
-afconvert -f WAVE -d LEI16@8000 -c 1 menu.aiff menu.wav
+ffmpeg -i menu.aiff -ar 8000 -ac 1 -c:a pcm_s16le menu.wav
 scp menu.wav root@<VPS>:/var/lib/asterisk/sounds/en/custom/menu.wav
 ```
+
+If a prompt still won't play, re-encode it on the server with `sox`, which cleans the header:
+`sox menu.wav -b 16 -e signed-integer -r 8000 -c 1 clean.wav && mv clean.wav menu.wav`. Verify with
+`asterisk -rx 'file convert .../menu.wav /tmp/t.ulaw'` — it must succeed.
 
 The IVR **answers** the call to play the menu — that's expected (the caller hears the menu, not ringback). DTMF from the caller reaches Asterisk over the same RFC 4733 relay path the bridge already uses, so digit collection works on live PSTN callers. `dtmf_mode=rfc4733` must be set on the trunk (it is in the template).
 
