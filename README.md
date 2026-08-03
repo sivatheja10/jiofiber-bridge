@@ -236,6 +236,20 @@ Drop `menu.wav` at that path (`chown asterisk`) and you're done. (`asterisk/exte
 
 The IVR **answers** the call to play the menu — that's expected (the caller hears the menu, not ringback). DTMF from the caller reaches Asterisk over the same RFC 4733 relay path the bridge already uses, so digit collection works on live PSTN callers. `dtmf_mode=rfc4733` must be set on the trunk (it is in the template).
 
+### Using a different PBX (Grandstream UCM, FreePBX, …): IVRs must ANSWER, not play early media
+
+You don't have to use the shipped Asterisk configs — anything that speaks SIP can sit on the trunk side. One rule matters, and it's the one that bites people migrating from an **analog (FXO) trunk**:
+
+> **An interactive IVR must answer the call (send `200 OK`) before playing its prompt.** Playing the prompt as *early media* (`183 Session Progress`, no answer) leaves the caller's leg unanswered — the caller "keeps ringing, no answer, no ring tone", and the core's ring timer tears the call down after ~a minute regardless.
+
+This is answer supervision, and it's the industry-standard behavior (RFC 3960 limits early media to call-progress indications like ringback and announcements): billing starts at answer, unanswered calls are killed by the core's ring timer, and pre-answer DTMF (RFC 4733) is not reliably relayed by carrier cores — so a pre-answer menu can't even collect digits dependably. An FXO trunk masked all of this because analog lines have **no** answer supervision — the PBX can put any audio on the wire without ever signaling answer. SIP makes the distinction real.
+
+Concretely, on a **Grandstream UCM**: point the inbound route of the bridge trunk at an **IVR (auto-attendant)** — which answers before playing — rather than a ring group with a "custom ringback tone", and disable **Enable Early Media** on the trunk's advanced settings. On **FreePBX**: inbound route → IVR destination (answers by default).
+
+If you genuinely can't make your PBX answer first, the bridge has an escape hatch: set `EARLY_ANSWER=1` in `bridge.env`. On the PBX's first `183` the bridge answers the caller immediately (the SBC "answer on early media" pattern), so the caller hears the prompt and the ring timer never fires. Trade-off: the call is answered — and billed — from that moment, even if nobody ever picks up. Default is off.
+
+**Caller-ID on other PBXes:** the bridge presents the caller's number in the custom `X-Jio-Caller` header (which the shipped Asterisk dialplan reads) **and** in standard `P-Asserted-Identity` / `Remote-Party-ID` headers. On a UCM/FreePBX, just enable "trust inbound identity headers (PAI/RPID)" on the trunk and inbound caller-ID works with no dialplan.
+
 ---
 
 ## Step 6 — Softphones
@@ -274,7 +288,7 @@ For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP por
 
 **DTMF** — end-to-end via RFC 4733 on the phone side, relayed digit-for-digit by the bridge (`on_dtmf_digit` → `pjsua_call_dial_dtmf`). Digits arrive correctly in both directions. You may hear a brief warble on the tone — that's a cosmetic AMR transcoding artifact, not a delivery failure.
 
-**Caller-ID (inbound)** — the bridge extracts the calling number from the inbound INVITE and passes it to Asterisk in an `X-Jio-Caller` header; `from-jio` copies it into CALLERID so your softphone shows who's calling.
+**Caller-ID (inbound)** — the bridge extracts the calling number from the inbound INVITE and passes it downstream in an `X-Jio-Caller` header (the shipped `from-jio` dialplan copies it into CALLERID) and in standard `P-Asserted-Identity`/`Remote-Party-ID` headers (for PBXes that trust identity headers instead — UCM, FreePBX).
 
 ---
 
@@ -288,6 +302,7 @@ For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP por
 - **One-way audio** = RTP bound to the wrong interface on a multi-homed box. The bridge is multi-homed (LAN + overlay); it pins `acc_jio` RTP to the **LAN** IP and `acc_trunk` RTP to the **overlay** IP. `register.sh` auto-detects the LAN IP with `ip -4 route get $ROUTER_IP`. Get this backwards and you get audio in exactly one direction.
 - **Phone never rings on inbound** even though outbound works = registered with only the `mmtel` feature tag. The core forks inbound only to contacts advertising the **full** RCS/MMTEL tag set **and** a JioCall-like `User-Agent`. → the bridge's `reg_contact_params`.
 - **Premature `200 OK`** = the B2BUA answered the trunk leg before the far end did. Fixed by mirroring provisional responses (180/183) and propagating the real answer/failure code across the two legs.
+- **Downstream PBX IVR "keeps ringing, no answer, no audio"** (classic on Grandstream UCM after migrating from an FXO trunk) = the PBX is playing the IVR/custom ringtone as **early media** (`183`) and never answering. Configure the PBX to answer first (inbound route → auto-attendant, early media off) — see [IVRs must answer](#using-a-different-pbx-grandstream-ucm-freepbx--ivrs-must-answer-not-play-early-media) — or set `EARLY_ANSWER=1`.
 - **iOS softphone stops ringing after a while** = backgrounded Linphone/Zoiper dropped registration. Use Groundwire (push).
 - **~0.5 s latency** is inherent to the geographic round-trip + AMR framing; not a bug.
 - **Overlay via DERP relay** adds latency — prefer a direct path; the health check warns about this.

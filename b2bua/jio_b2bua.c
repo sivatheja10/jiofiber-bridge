@@ -9,11 +9,18 @@
  * Bridges calls both directions; pjsua's conf bridge transcodes AMR<->PCMU.
  * DTMF (RFC2833) is relayed explicitly (the conf bridge doesn't carry it).
  * Proper B2BUA signaling: mirrors 180/183/200 and propagates failure codes.
+ * Early media (183+SDP) is relayed with SDP on both legs, so pre-answer audio
+ * (ringback, network announcements) bridges through. Inbound caller-ID is
+ * presented as X-Jio-Caller (custom) AND P-Asserted-Identity/Remote-Party-ID
+ * (standard), so non-Asterisk PBXes (Grandstream UCM, FreePBX) get CID too.
  *
  * Identity comes from environment variables (fill these in, see bridge.env):
  *   SIP_PUBLIC_ID   e.g. sip:+<CC><NUMBER>@<REALM>     (WITH the +)
  *   SIP_REALM       e.g. <circle>.wln.ims.jio.com
  *   REGISTRAR       e.g. sip:jiofiber.local.html:5068;transport=tls  (the router)
+ *   EARLY_ANSWER    optional, "1" = answer the caller as soon as the downstream
+ *                   PBX sends 183. For PBXes that play an IVR/custom ringtone as
+ *                   early media and never send 200 (see README). Default off.
  * Runtime values come from argv:
  *   argv: jio_b2bua <auth_user> <password> <bridge_overlay_ip> <asterisk_overlay_ip> <bridge_lan_ip>
  *     auth_user            = SIP digest authid, e.g. <CC><NUMBER>@<REALM>  (NO +)
@@ -36,6 +43,7 @@ static char g_realm[128];                     /* SIP realm for outbound R-URI */
 static pjsua_call_id g_peer[PJSUA_MAX_CALLS]; /* call_id -> bridged peer call_id */
 static pj_bool_t g_bleg[PJSUA_MAX_CALLS];     /* TRUE if this call is the outgoing (B) leg */
 static int g_prov[PJSUA_MAX_CALLS];           /* last provisional code relayed to this (A) leg */
+static pj_bool_t g_early_answer = PJ_FALSE;   /* EARLY_ANSWER=1: answer caller on PBX 183 (early-media IVR mode) */
 
 static void err(const char*t, pj_status_t s){ pjsua_perror(THIS_FILE,t,s); pjsua_destroy(); exit(1); }
 static void on_reg_state(pjsua_acc_id acc){ pjsua_acc_info i; pjsua_acc_get_info(acc,&i);
@@ -66,6 +74,16 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id, pjsip_r
         pjsua_msg_data md; pjsua_msg_data_init(&md);
         pjsip_generic_string_hdr hdr; pj_str_t hn=pj_str("X-Jio-Caller"), hv=pj_str(caller);
         pjsip_generic_string_hdr_init2(&hdr,&hn,&hv); pj_list_push_back(&md.hdr_list,&hdr);
+        /* Standard caller-ID headers too (RFC 3325 PAI + legacy RPID) so PBXes that can't
+         * read custom headers (Grandstream UCM, FreePBX) show the real caller: enable
+         * "trust inbound identity headers" on the PBX trunk and CID just works. */
+        char pai[192], rpid[224]; pjsip_generic_string_hdr h_pai, h_rpid;
+        pj_ansi_snprintf(pai,sizeof(pai),"<sip:%s@%s>",caller,g_realm);
+        pj_ansi_snprintf(rpid,sizeof(rpid),"\"%s\" <sip:%s@%s>;party=calling;screen=yes",caller,caller,g_realm);
+        pj_str_t pn=pj_str("P-Asserted-Identity"), pv=pj_str(pai);
+        pj_str_t rn=pj_str("Remote-Party-ID"),     rv=pj_str(rpid);
+        pjsip_generic_string_hdr_init2(&h_pai,&pn,&pv);  pj_list_push_back(&md.hdr_list,&h_pai);
+        pjsip_generic_string_hdr_init2(&h_rpid,&rn,&rv); pj_list_push_back(&md.hdr_list,&h_rpid);
         PJ_LOG(3,(THIS_FILE,"inbound caller=%s",caller));
         if (pjsua_call_make_call(g_acc_trunk,&d,&cs,NULL,(caller[0]?&md:NULL),&peer)!=PJ_SUCCESS) { pjsua_call_hangup(call_id,503,NULL,NULL); return; }
     } else if (acc_id == g_acc_trunk) {
@@ -104,13 +122,27 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e){
     pjsua_call_id peer=g_peer[call_id];
     /* Outgoing (B) leg: mirror its signaling to the incoming (A) leg (proper B2BUA behavior) */
     if (g_bleg[call_id] && peer>=0 && peer<PJSUA_MAX_CALLS && pjsua_call_is_active(peer)){
-        if (ci.state==PJSIP_INV_STATE_EARLY){
+        /* Never signal an A-leg that is already answered (late 183 after an
+         * EARLY_ANSWER 200, or a double 200, would be an invalid-state error). */
+        pjsua_call_info pi;
+        pj_bool_t peer_unanswered = (pjsua_call_get_info(peer,&pi)==PJ_SUCCESS &&
+                                     pi.state < PJSIP_INV_STATE_CONFIRMED);
+        if (ci.state==PJSIP_INV_STATE_EARLY && peer_unanswered){
             int code=ci.last_status;
-            if (code>=180 && code<200 && g_prov[peer]!=code){
+            if (code==183 && g_early_answer && ci.acc_id==g_acc_trunk){
+                /* The downstream PBX plays its IVR/ringtone as early media (183) and may
+                 * never send 200 — an unanswered caller leg would be torn down by the
+                 * core's ring timer. SBC-style "answer on early media": answer the caller
+                 * now (billing/answer supervision starts here — opt-in, see README). */
+                PJ_LOG(3,(THIS_FILE,"EARLY_ANSWER: 183 from PBX leg %d -> answering caller leg %d",call_id,peer));
+                pjsua_call_answer(peer, 200, NULL, NULL);
+            } else if (code>=180 && code<200 && g_prov[peer]!=code){
                 g_prov[peer]=code;
-                pjsua_call_answer(peer, code, NULL, NULL); /* relay 180/183 (183 -> early media) */
+                /* relay 180/183; a 183 carries our SDP answer -> early media on both
+                 * legs, bridged by on_call_media_state (pre-answer ringback/announcements) */
+                pjsua_call_answer(peer, code, NULL, NULL);
             }
-        } else if (ci.state==PJSIP_INV_STATE_CONFIRMED){
+        } else if (ci.state==PJSIP_INV_STATE_CONFIRMED && peer_unanswered){
             pjsua_call_answer(peer, 200, NULL, NULL);       /* far end answered -> answer caller */
         }
     }
@@ -159,6 +191,7 @@ int main(int argc,char*argv[]){
     if(!pub_id||!realm){ printf("ERROR: set SIP_PUBLIC_ID and SIP_REALM env vars\n"); return 1; }
     if(!registrar) registrar="sip:jiofiber.local.html:5068;transport=tls";
     strncpy(g_realm,realm,sizeof(g_realm)-1);
+    { const char*ea=getenv("EARLY_ANSWER"); g_early_answer=(ea&&*ea&&strcmp(ea,"0")!=0)?PJ_TRUE:PJ_FALSE; }
 
     st=pjsua_create(); if(st!=PJ_SUCCESS) err("create",st);
     { pjsua_config cfg; pjsua_logging_config lc; pjsua_config_default(&cfg);
@@ -185,6 +218,9 @@ int main(int argc,char*argv[]){
       c.cred_count=1; c.cred_info[0].realm=pj_str("*"); c.cred_info[0].scheme=pj_str("digest");
       c.cred_info[0].username=pj_str((char*)user); c.cred_info[0].data_type=PJSIP_CRED_DATA_PLAIN_PASSWD;
       c.cred_info[0].data=pj_str((char*)pass); c.use_rfc5626=PJ_TRUE;
+      /* Support PRACK when asked (IMS cores may want reliable 183s for early media;
+       * without this a Require:100rel INVITE would have to be rejected 420). */
+      c.require_100rel=PJSUA_100REL_OPTIONAL;
       /* Pin JUICE-leg RTP to the LAN interface (the router is on the LAN) */
       pjsua_transport_config_default(&c.rtp_cfg); c.rtp_cfg.port=4000; c.rtp_cfg.bound_addr=pj_str((char*)lan_ip); c.rtp_cfg.public_addr=pj_str((char*)lan_ip);
       /* Advertise IMS MMTEL (voice) + RCS capability so JUICE forks INBOUND voice calls to us.
@@ -198,6 +234,6 @@ int main(int argc,char*argv[]){
       /* Pin trunk-leg RTP to the overlay interface (so Asterisk over the tunnel can route audio back) */
       pjsua_transport_config_default(&c.rtp_cfg); c.rtp_cfg.port=5000; c.rtp_cfg.bound_addr=pj_str((char*)bridge_ts); c.rtp_cfg.public_addr=pj_str((char*)bridge_ts);
       st=pjsua_acc_add(&c,PJ_FALSE,&g_acc_trunk); if(st!=PJ_SUCCESS) err("acc_trunk",st); }
-    PJ_LOG(3,(THIS_FILE,"B2BUA up: acc_jio=%d acc_trunk=%d trunk=%s:%d asterisk=%s",g_acc_jio,g_acc_trunk,bridge_ts,TRUNK_PORT,g_asterisk));
+    PJ_LOG(3,(THIS_FILE,"B2BUA up: acc_jio=%d acc_trunk=%d trunk=%s:%d asterisk=%s early_answer=%d",g_acc_jio,g_acc_trunk,bridge_ts,TRUNK_PORT,g_asterisk,g_early_answer));
     for(;;) pj_thread_sleep(3600000);
 }
