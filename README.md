@@ -326,6 +326,7 @@ Most "it worked yesterday, `403` today" cases are a password that rotated becaus
 ## Security notes
 
 - No SIP port is exposed from your **home** — the only inbound path there is over the encrypted overlay.
+- The bridge accepts trunk calls (i.e. outbound dialing) **only from `ASTERISK_OVERLAY_IP`** — anything else on the overlay gets a `403`. Overlay networks are often shared (other devices, other tailnet users); without this check any of them could dial out through your landline.
 - The VPS exposes just the phone-facing registrar (`5560`) and the RTP range; firewall them to your phones' networks where practical and use strong per-phone passwords.
 - The device password is **never stored** in the repo or on disk — it's fetched live at process start.
 - Keep `bridge.env` and `/etc/asterisk/*.conf` (with real passwords) out of git. This repo ships only `*.example` / placeholder templates.

@@ -57,7 +57,7 @@ static void dump_call(pjsua_call_id id, const char* when){
 }
 
 static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id, pjsip_rx_data *rdata){
-    pjsua_call_info ci; PJ_UNUSED_ARG(rdata);
+    pjsua_call_info ci;
     pjsua_call_get_info(call_id,&ci);
     PJ_LOG(3,(THIS_FILE,"Incoming call %d on acc %d from %.*s to %.*s",call_id,acc_id,
         (int)ci.remote_info.slen,ci.remote_info.ptr,(int)ci.local_info.slen,ci.local_info.ptr));
@@ -87,6 +87,14 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id, pjsip_r
         PJ_LOG(3,(THIS_FILE,"inbound caller=%s",caller));
         if (pjsua_call_make_call(g_acc_trunk,&d,&cs,NULL,(caller[0]?&md:NULL),&peer)!=PJ_SUCCESS) { pjsua_call_hangup(call_id,503,NULL,NULL); return; }
     } else if (acc_id == g_acc_trunk) {
+        /* Only the configured Asterisk may originate outbound calls. The overlay
+         * network may be shared (other tailnet devices/users), and an unchecked
+         * trunk port would let any of them dial out through the landline. */
+        if (pj_ansi_strcmp(rdata->pkt_info.src_name, g_asterisk)!=0) {
+            PJ_LOG(2,(THIS_FILE,"rejecting trunk call from %s (expected %s)",
+                      rdata->pkt_info.src_name, g_asterisk));
+            pjsua_call_hangup(call_id,403,NULL,NULL); return;
+        }
         /* OUTBOUND: a phone dialed a number. Extract the user part of the To/request URI. */
         char li[256]; int lil=(int)(ci.local_info.slen<255?ci.local_info.slen:255);
         memcpy(li,ci.local_info.ptr,lil); li[lil]=0;
@@ -123,10 +131,11 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e){
     /* Outgoing (B) leg: mirror its signaling to the incoming (A) leg (proper B2BUA behavior) */
     if (g_bleg[call_id] && peer>=0 && peer<PJSUA_MAX_CALLS && pjsua_call_is_active(peer)){
         /* Never signal an A-leg that is already answered (late 183 after an
-         * EARLY_ANSWER 200, or a double 200, would be an invalid-state error). */
+         * EARLY_ANSWER 200, or a double 200, would be an invalid-state error).
+         * CONNECTING counts as answered: our 200 is out, we're waiting for the ACK. */
         pjsua_call_info pi;
         pj_bool_t peer_unanswered = (pjsua_call_get_info(peer,&pi)==PJ_SUCCESS &&
-                                     pi.state < PJSIP_INV_STATE_CONFIRMED);
+                                     pi.state < PJSIP_INV_STATE_CONNECTING);
         if (ci.state==PJSIP_INV_STATE_EARLY && peer_unanswered){
             int code=ci.last_status;
             if (code==183 && g_early_answer && ci.acc_id==g_acc_trunk){
@@ -227,6 +236,9 @@ int main(int argc,char*argv[]){
        * This full set + the JUICEJFV User-Agent is REQUIRED for inbound; mmtel alone is not enough. */
       c.reg_contact_params=pj_str(";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";+g.3gpp.iari-ref=\"urn%3Aurn-7%3A3gpp-application.ims.iari.rcs.jio.eucr\";+g.gsma.rcs.telephony=\"none\";video");
       st=pjsua_acc_add(&c,PJ_TRUE,&g_acc_jio); if(st!=PJ_SUCCESS) err("acc_jio",st); }
+    /* pjsua_acc_add dup'ed the credential into its own pool — scrub the rotating
+     * password from argv so it isn't visible in `ps` / /proc/<pid>/cmdline. */
+    memset(argv[2],'*',strlen(argv[2]));
     /* acc_trunk: static trunk toward Asterisk (no registration) */
     { pjsua_acc_config c; pjsua_acc_config_default(&c);
       char idbuf[128]; pj_ansi_snprintf(idbuf,sizeof(idbuf),"sip:jiobridge@%s:%d",bridge_ts,TRUNK_PORT);
