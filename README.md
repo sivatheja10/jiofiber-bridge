@@ -170,6 +170,24 @@ The IMS core will only accept a device that your account has explicitly added, a
 
 > If you re-provision with a new OTP, the password rotates; any previously fetched password is now invalid (this is the source of most `403 Invalid password` confusion — see the [403 decoder](#the-403-decoder)).
 
+### Alternative: recover the *static* upstream digest password
+
+The rotating password above is JUICE's own local credential. Your ONT also holds a
+**static** IMS digest password — the one it uses to register **upstream to the core**. If
+you need that (to audit your own line, or to register directly to the core), recover **and
+cryptographically verify** it from your own router with:
+
+```bash
+uv run scripts/jfv-credfind.py <router-ip> <router-password>
+# e.g.  uv run scripts/jfv-credfind.py 192.168.29.1 <router-pw>   (add --telnet if it uses telnet)
+```
+
+It finds the token in the router's voice-daemon memory that reproduces the router's own SIP
+`REGISTER` digest — a verified match, not a guess — and prints `IMS_IMPI` / `IMS_PASSWORD` /
+`SIP_REALM` for you. Full usage, the on-box variant, and portability notes are in
+[`scripts/CREDENTIAL-RECOVERY.md`](scripts/CREDENTIAL-RECOVERY.md). **Your own line only; never
+commit the recovered secret** (`.gitignore` already keeps `*.env` out of git).
+
 ---
 
 ## Step 4 — Run the bridge as a service
