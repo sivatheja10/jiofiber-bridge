@@ -93,6 +93,7 @@ b2bua/jio_b2bua.c            The B2BUA. Reads identity from env; args are the se
 patches/pjproject-jiofiber.patch   3 patches: AMR mode-set, +sip.instance format, contact_params guard.
 patches/config_site.h        pjproject build config (AMR NB/WB on, video off).
 bridge.env.example           Copy to bridge.env and fill in. Sourced by the scripts.
+DIRECT-IMS.md                Advanced: register straight to the P-CSCF (DIRECT_IMS=1), bypassing JUICE.
 scripts/register.sh          Sets device hostname, fetches the rotating password, runs the B2BUA.
 scripts/healthcheck.sh       Verifies the TLS reg is up; restarts + alerts on failure.
 scripts/jfv-credfind.py      Recover+VERIFY your line's IMS SIP digest password (from your PC). See scripts/CREDENTIAL-RECOVERY.md.
@@ -187,6 +188,9 @@ It finds the token in the router's voice-daemon memory that reproduces the route
 `SIP_REALM` for you. Full usage, the on-box variant, and portability notes are in
 [`scripts/CREDENTIAL-RECOVERY.md`](scripts/CREDENTIAL-RECOVERY.md). **Your own line only; never
 commit the recovered secret** (`.gitignore` already keeps `*.env` out of git).
+
+Once you have that static credential you can register **directly to the IMS core (P-CSCF)**,
+bypassing JUICE entirely — the `DIRECT_IMS=1` option. See [`DIRECT-IMS.md`](DIRECT-IMS.md).
 
 ---
 

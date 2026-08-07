@@ -28,6 +28,13 @@
  *     bridge_overlay_ip    = this host's overlay (Tailscale) IP  -> trunk + trunk RTP
  *     asterisk_overlay_ip  = Asterisk's overlay IP               -> where inbound calls go
  *     bridge_lan_ip        = this host's LAN IP on the router subnet -> JUICE-leg RTP
+ *
+ * DIRECT-IMS mode: setting DIRECT_IMS=1 (plus the IMS_*/PCSCF_V6/JIO_LAN_V6 env
+ * vars, see DIRECT-IMS.md) switches leg A to register directly to the IMS core's
+ * P-CSCF over TLS/IPv6 instead of to the router's JUICE server. In direct mode the
+ * Jio-leg identity/password come from the IMS_* env vars, so argv[1]/argv[2]/argv[5]
+ * are unused (still pass placeholders to satisfy the 5-arg check); argv[3]=bridge
+ * overlay IP and argv[4]=asterisk overlay IP are still used for the trunk.
  */
 #include <pjsua-lib/pjsua.h>
 #include <stdlib.h>
@@ -189,6 +196,9 @@ static void on_dtmf_digit(pjsua_call_id call_id, int digit){
     }
 }
 
+static const char *envs(const char *k,const char *d){ const char *v=getenv(k); return (v&&*v)?v:d; }
+static int env_on(const char *k){ const char *v=getenv(k); return v&&*v&&strcmp(v,"0")!=0; }
+
 int main(int argc,char*argv[]){
     pj_status_t st; for(int i=0;i<PJSUA_MAX_CALLS;i++) g_peer[i]=PJSUA_INVALID_ID;
     if(argc<6){ printf("usage: %s <auth_user> <password> <bridge_overlay_ip> <asterisk_overlay_ip> <bridge_lan_ip>\n",argv[0]); return 1; }
@@ -197,29 +207,84 @@ int main(int argc,char*argv[]){
     const char *pub_id = getenv("SIP_PUBLIC_ID");   /* sip:+<CC><NUMBER>@<REALM> */
     const char *realm  = getenv("SIP_REALM");       /* <circle>.wln.ims.jio.com  */
     const char *registrar = getenv("REGISTRAR");    /* sip:jiofiber.local.html:5068;transport=tls */
-    if(!pub_id||!realm){ printf("ERROR: set SIP_PUBLIC_ID and SIP_REALM env vars\n"); return 1; }
+    const int direct = env_on("DIRECT_IMS");   /* register straight to the P-CSCF (bypass JUICE) */
+    if(direct){ if(!pub_id) pub_id=getenv("IMS_AOR"); if(!realm) realm=getenv("IMS_REALM"); }  /* direct mode uses IMS_* */
+    if(!pub_id||!realm){ printf("ERROR: set SIP_PUBLIC_ID and SIP_REALM (or, in DIRECT_IMS mode, IMS_AOR and IMS_REALM)\n"); return 1; }
     if(!registrar) registrar="sip:jiofiber.local.html:5068;transport=tls";
     strncpy(g_realm,realm,sizeof(g_realm)-1);
     { const char*ea=getenv("EARLY_ANSWER"); g_early_answer=(ea&&*ea&&strcmp(ea,"0")!=0)?PJ_TRUE:PJ_FALSE; }
 
     st=pjsua_create(); if(st!=PJ_SUCCESS) err("create",st);
     { pjsua_config cfg; pjsua_logging_config lc; pjsua_config_default(&cfg);
-      cfg.user_agent=pj_str("JUICEJFV-1.3.32");  /* JioFiber-recognized UA (required for inbound forking) */
+      cfg.user_agent = pj_str((char*)(direct ? envs("IMS_UA","JCOW407/JUICEJFV-1.3.32") : "JUICEJFV-1.3.32"));  /* JioFiber-recognized UA */
       cfg.cb.on_reg_state=&on_reg_state; cfg.cb.on_incoming_call=&on_incoming_call;
       cfg.cb.on_call_media_state=&on_call_media_state; cfg.cb.on_call_state=&on_call_state; cfg.cb.on_dtmf_digit=&on_dtmf_digit;
       pjsua_logging_config_default(&lc); lc.console_level=4; lc.level=5; lc.log_filename=pj_str("/tmp/b2pj.log");
       st=pjsua_init(&cfg,&lc,NULL); if(st!=PJ_SUCCESS) err("init",st); }
-    /* TLS transport for JUICE (self-signed router cert -> verify off) */
-    { pjsua_transport_config t; pjsua_transport_config_default(&t); t.port=5062;
-      t.tls_setting.verify_server=PJ_FALSE; t.tls_setting.verify_client=PJ_FALSE; t.tls_setting.method=PJSIP_SSL_UNSPECIFIED_METHOD;
-      st=pjsua_transport_create(PJSIP_TRANSPORT_TLS,&t,NULL); if(st!=PJ_SUCCESS) err("tls",st); }
+    if (direct) {   /* core drops an idle TLS flow at ~15-20s; a short keepalive keeps the registration "live" */
+        int ka = atoi(envs("IMS_KEEPALIVE","10"));
+        pjsip_cfg()->tls.keep_alive_interval = ka;
+        pjsip_cfg()->tcp.keep_alive_interval = ka;
+    }
+    pjsua_transport_id tid_jio;
+    if (direct) {
+        /* TLS over IPv6 to the P-CSCF, bound to a Jio global IPv6 on this host */
+        pjsua_transport_config t; pjsua_transport_config_default(&t);
+        t.port = (unsigned)atoi(envs("SIP_LOCAL_PORT","5062"));
+        t.bound_addr = pj_str((char*)getenv("JIO_LAN_V6"));
+        t.tls_setting.verify_server=PJ_FALSE; t.tls_setting.verify_client=PJ_FALSE;
+        t.tls_setting.method=PJSIP_SSL_UNSPECIFIED_METHOD;
+        st=pjsua_transport_create(PJSIP_TRANSPORT_TLS6,&t,&tid_jio); if(st!=PJ_SUCCESS) err("tls6",st);
+    } else {
+        /* TLS transport for JUICE (self-signed router cert -> verify off) */
+        pjsua_transport_config t; pjsua_transport_config_default(&t); t.port=5062;
+        t.tls_setting.verify_server=PJ_FALSE; t.tls_setting.verify_client=PJ_FALSE; t.tls_setting.method=PJSIP_SSL_UNSPECIFIED_METHOD;
+        st=pjsua_transport_create(PJSIP_TRANSPORT_TLS,&t,&tid_jio); if(st!=PJ_SUCCESS) err("tls",st);
+    }
     /* UDP transport bound to the overlay IP for the Asterisk trunk */
     pjsua_transport_id tid_udp;
     { pjsua_transport_config t; pjsua_transport_config_default(&t); t.port=TRUNK_PORT; t.bound_addr=pj_str((char*)bridge_ts);
       st=pjsua_transport_create(PJSIP_TRANSPORT_UDP,&t,&tid_udp); if(st!=PJ_SUCCESS) err("udp trunk",st); }
     st=pjsua_start(); if(st!=PJ_SUCCESS) err("start",st);
     pjsua_set_null_snd_dev(); set_codecs();
-    /* acc_jio: register to JUICE */
+    /* acc_jio: register to the Jio leg (P-CSCF directly in DIRECT_IMS mode, else JUICE) */
+    if (direct) {
+        pjsua_acc_config c; pjsua_acc_config_default(&c);
+        static char reg_uri[128], proxy[192];
+        const char *drealm = envs("IMS_REALM","");
+        pj_ansi_snprintf(reg_uri,sizeof reg_uri,"sip:%s",drealm);                                  /* Request-URI = realm */
+        pj_ansi_snprintf(proxy,sizeof proxy,"sip:[%s]:%s;transport=tls;lr",envs("PCSCF_V6",""),envs("PCSCF_PORT","5061"));
+        c.id = pj_str((char*)envs("IMS_AOR",""));           /* public id: sip:+<MSISDN>@<REALM> */
+        c.reg_uri = pj_str(reg_uri);
+        c.transport_id = tid_jio;                            /* pin in-dialog reqs (esp. the 2xx-ACK) to TLS6 */
+        c.proxy_cnt=1; c.proxy[0]=pj_str(proxy);             /* outbound proxy = P-CSCF */
+        c.cred_count=1;
+        c.cred_info[0].realm=pj_str((char*)drealm);          /* specific realm (NOT "*"): required for initial-auth */
+        c.cred_info[0].scheme=pj_str("digest");
+        c.cred_info[0].username=pj_str((char*)envs("IMS_IMPI",""));
+        c.cred_info[0].data_type=PJSIP_CRED_DATA_PLAIN_PASSWD;
+        c.cred_info[0].data=pj_str((char*)envs("IMS_PASSWORD",""));
+        c.use_rfc5626=PJ_TRUE;
+        c.reg_timeout=(unsigned)atoi(envs("IMS_REG_EXPIRES","3600"));   /* core Min-Expires=3600 else 423 */
+        c.auth_pref.initial_auth=PJ_TRUE;                    /* typed empty-auth on 1st REGISTER, else 483 */
+        c.auth_pref.algorithm=pj_str("md5");
+        c.ipv6_media_use=PJSUA_IPV6_ENABLED_USE_IPV6_ONLY;   /* media to Jio's IPv6 relay */
+        pjsua_transport_config_default(&c.rtp_cfg);
+        c.rtp_cfg.port=(unsigned)atoi(envs("RTP_LOCAL_PORT","4000"));
+        c.rtp_cfg.bound_addr=pj_str((char*)getenv("JIO_LAN_V6"));
+        c.rtp_cfg.public_addr=pj_str((char*)getenv("JIO_LAN_V6"));
+        /* RCS/MMTEL tags (INBOUND forking) + the JioFiber-Voice capability that authorizes OUTBOUND (+u.jio.jfv) */
+        c.reg_contact_params=pj_str(";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\""
+                                    ";+g.3gpp.iari-ref=\"urn%3Aurn-7%3A3gpp-application.ims.iari.rcs.jio.eucr\""
+                                    ";+g.gsma.rcs.telephony=\"none\";video;+u.jio.jfv;q=0.5");
+        /* P-Access-Network-Info on every REGISTER */
+        static pjsip_generic_string_hdr pani; static char pani_val[96];
+        pj_ansi_snprintf(pani_val,sizeof pani_val,"%s",envs("IMS_PANI","GPON;PSAPId=+<MSISDN>"));
+        pj_str_t pani_name=pj_str("P-Access-Network-Info"), pani_v=pj_str(pani_val);
+        pjsip_generic_string_hdr_init2(&pani,&pani_name,&pani_v);
+        pj_list_init(&c.reg_hdr_list); pj_list_push_back(&c.reg_hdr_list,&pani);
+        st=pjsua_acc_add(&c,PJ_TRUE,&g_acc_jio); if(st!=PJ_SUCCESS) err("acc_jio(direct)",st);
+    } else {
     { pjsua_acc_config c; pjsua_acc_config_default(&c);
       c.id=pj_str((char*)pub_id);
       c.reg_uri=pj_str((char*)registrar);
@@ -236,6 +301,7 @@ int main(int argc,char*argv[]){
        * This full set + the JUICEJFV User-Agent is REQUIRED for inbound; mmtel alone is not enough. */
       c.reg_contact_params=pj_str(";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";+g.3gpp.iari-ref=\"urn%3Aurn-7%3A3gpp-application.ims.iari.rcs.jio.eucr\";+g.gsma.rcs.telephony=\"none\";video");
       st=pjsua_acc_add(&c,PJ_TRUE,&g_acc_jio); if(st!=PJ_SUCCESS) err("acc_jio",st); }
+    }
     /* pjsua_acc_add dup'ed the credential into its own pool — scrub the rotating
      * password from argv so it isn't visible in `ps` / /proc/<pid>/cmdline. */
     memset(argv[2],'*',strlen(argv[2]));
