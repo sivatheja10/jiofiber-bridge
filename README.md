@@ -95,6 +95,8 @@ patches/config_site.h        pjproject build config (AMR NB/WB on, video off).
 bridge.env.example           Copy to bridge.env and fill in. Sourced by the scripts.
 scripts/register.sh          Sets device hostname, fetches the rotating password, runs the B2BUA.
 scripts/healthcheck.sh       Verifies the TLS reg is up; restarts + alerts on failure.
+scripts/jfv-credfind.py      Recover+VERIFY your line's IMS SIP digest password (from your PC). See scripts/CREDENTIAL-RECOVERY.md.
+scripts/jfv-credfind.sh      Same, but runs on the router (busybox). Own line only.
 asterisk/pjsip.conf          Your phones (6001/6002) + the static trunk to the bridge.
 asterisk/extensions.conf     Number normalization (out) + ring-all with caller-ID (in).
 asterisk/rtp.conf            RTP port range.
