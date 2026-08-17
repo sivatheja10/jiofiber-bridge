@@ -29,6 +29,7 @@ Everything here is a **template**. There are **no** real numbers, IP addresses, 
 - [Security notes](#security-notes)
 - [Acknowledgements](#acknowledgements)
 - [Disclaimer](#disclaimer)
+- [License](#license)
 
 ---
 
@@ -376,3 +377,11 @@ If you built on something here or spot missing attribution, please open an issue
 ## Disclaimer
 
 This interoperates with your **own** telephone line for **personal** use, the same way the official app on your own router does. It reimplements a client to a service you pay for. Check your provider's terms; you're responsible for how you use it. Provided as-is, no warranty. Not affiliated with, or endorsed by, any ISP or provider.
+
+---
+
+## License
+
+**MIT** — see [`LICENSE`](LICENSE). You may use, modify, and redistribute this repository's own source, scripts, configs, and docs; it is provided **as-is, with no warranty and no liability** (see the licence text).
+
+One caveat, spelled out in [`NOTICE`](NOTICE): the bridge **links pjproject** (GPLv2) and the files under `patches/` are modifications to pjproject, so a **compiled binary is a GPLv2 combined work** and those patch files are GPLv2. MIT covers this repo's original code; the GPLv2 obligations come from the upstream telephony stack you build against.

@@ -1,0 +1,33 @@
+jiofiber-bridge
+Copyright (c) 2026 sivatheja10
+
+The original work in this repository — the bridge source (b2bua/), scripts
+(scripts/), Asterisk/systemd configuration templates, and documentation — is
+licensed under the MIT License (see LICENSE).
+
+This project builds on and interoperates with third-party components that are
+distributed under their own licenses. Those licenses are NOT changed by the MIT
+license above:
+
+- pjproject / PJSIP  (https://github.com/pjsip/pjproject)
+  Licensed GPLv2 (or a separate commercial license from Teluu).
+  `b2bua/jio_b2bua.c` is written to LINK against pjproject, and the files under
+  `patches/` (pjproject-jiofiber.patch, config_site.h) are MODIFICATIONS to
+  pjproject. Those patch files are therefore governed by pjproject's license
+  (GPLv2), not by the MIT license. A binary built from this project by linking
+  pjproject is a combined work and is subject to the GPLv2.
+
+- Asterisk  (https://github.com/asterisk/asterisk)
+  Licensed GPLv2. The files under `asterisk/` are configuration/data for
+  Asterisk, not derivative Asterisk source.
+
+- opencore-amr / vo-amrwbenc (AMR / AMR-WB codecs)
+  Licensed Apache-2.0.
+
+In short: the MIT license covers this repository's own source, scripts, configs,
+and docs; anything you build by compiling and linking the GPLv2 dependencies
+above is a GPLv2 combined work, and the `patches/` are GPLv2.
+
+"Jio", "JioFiber", and related names are trademarks of their respective owners.
+This project is not affiliated with, sponsored by, or endorsed by any ISP,
+carrier, or provider.
