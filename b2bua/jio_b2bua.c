@@ -5,6 +5,10 @@
  *                    forked to us. Media: AMR (as JUICE requires) <-> PCMU.
  * Leg B (acc_trunk): static UDP trunk to an Asterisk instance (over your overlay
  *                    network, e.g. Tailscale/WireGuard). Media: PCMU.
+ *                    Set TRUNK_SIP_TRANSPORT=tcp to run the trunk over TCP instead
+ *                    (needed e.g. when Asterisk runs inside Docker Desktop on
+ *                    Windows/WSL, which drops the container's UDP return traffic).
+ *                    TRUNK_SIP_BIND overrides the trunk bind address (default argv[3]).
  *
  * Bridges calls both directions; pjsua's conf bridge transcodes AMR<->PCMU.
  * DTMF (RFC2833) is relayed explicitly (the conf bridge doesn't carry it).
@@ -50,6 +54,7 @@ static char g_realm[128];                     /* SIP realm for outbound R-URI */
 static pjsua_call_id g_peer[PJSUA_MAX_CALLS]; /* call_id -> bridged peer call_id */
 static pj_bool_t g_bleg[PJSUA_MAX_CALLS];     /* TRUE if this call is the outgoing (B) leg */
 static int g_prov[PJSUA_MAX_CALLS];           /* last provisional code relayed to this (A) leg */
+static int g_trunk_tcp = 0;                   /* trunk leg uses TCP instead of UDP (TRUNK_SIP_TRANSPORT=tcp) */
 static pj_bool_t g_early_answer = PJ_FALSE;   /* EARLY_ANSWER=1: answer caller on PBX 183 (early-media IVR mode) */
 
 static void err(const char*t, pj_status_t s){ pjsua_perror(THIS_FILE,t,s); pjsua_destroy(); exit(1); }
@@ -76,7 +81,8 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id, pjsip_r
         memcpy(ri,ci.remote_info.ptr,ril); ri[ril]=0;
         char caller[64]=""; char*cp=strstr(ri,"sip:");
         if(cp){ cp+=4; char*ca=strchr(cp,'@'); int ck=ca?(int)(ca-cp):0; if(ck>0&&ck<63){ memcpy(caller,cp,ck); caller[ck]=0; } }
-        pj_ansi_snprintf(dsturi,sizeof(dsturi),"sip:s@%s:%d",g_asterisk,ASTERISK_PORT);
+        pj_ansi_snprintf(dsturi,sizeof(dsturi),"sip:s@%s:%d%s",g_asterisk,ASTERISK_PORT,
+                         g_trunk_tcp ? ";transport=tcp" : "");
         d=pj_str(dsturi);
         pjsua_msg_data md; pjsua_msg_data_init(&md);
         pjsip_generic_string_hdr hdr; pj_str_t hn=pj_str("X-Jio-Caller"), hv=pj_str(caller);
@@ -241,10 +247,22 @@ int main(int argc,char*argv[]){
         t.tls_setting.verify_server=PJ_FALSE; t.tls_setting.verify_client=PJ_FALSE; t.tls_setting.method=PJSIP_SSL_UNSPECIFIED_METHOD;
         st=pjsua_transport_create(PJSIP_TRANSPORT_TLS,&t,&tid_jio); if(st!=PJ_SUCCESS) err("tls",st);
     }
-    /* UDP transport bound to the overlay IP for the Asterisk trunk */
-    pjsua_transport_id tid_udp;
-    { pjsua_transport_config t; pjsua_transport_config_default(&t); t.port=TRUNK_PORT; t.bound_addr=pj_str((char*)bridge_ts);
-      st=pjsua_transport_create(PJSIP_TRANSPORT_UDP,&t,&tid_udp); if(st!=PJ_SUCCESS) err("udp trunk",st); }
+    /* Trunk transport to Asterisk: UDP by default (overlay path is fine); TCP opt-in
+     * (TRUNK_SIP_TRANSPORT=tcp) for topologies where UDP return traffic gets dropped —
+     * notably Docker Desktop on Windows/WSL, which delivers inbound UDP to the container
+     * but doesn't return the container's replies. TRUNK_SIP_BIND overrides the bind
+     * address (default: argv[3]). */
+    pjsua_transport_id tid_trunk;
+    {
+        const char *tt = envs("TRUNK_SIP_TRANSPORT", "udp");
+        g_trunk_tcp = (strcmp(tt,"tcp")==0 || strcmp(tt,"TCP")==0);
+        const char *tb = envs("TRUNK_SIP_BIND", bridge_ts);
+        pjsua_transport_config t; pjsua_transport_config_default(&t);
+        t.port = TRUNK_PORT; t.bound_addr = pj_str((char*)tb);
+        st = pjsua_transport_create(g_trunk_tcp ? PJSIP_TRANSPORT_TCP : PJSIP_TRANSPORT_UDP,
+                                    &t, &tid_trunk);
+        if (st != PJ_SUCCESS) err(g_trunk_tcp ? "tcp trunk" : "udp trunk", st);
+    }
     st=pjsua_start(); if(st!=PJ_SUCCESS) err("start",st);
     pjsua_set_null_snd_dev(); set_codecs();
     /* acc_jio: register to the Jio leg (P-CSCF directly in DIRECT_IMS mode, else JUICE) */
@@ -307,11 +325,12 @@ int main(int argc,char*argv[]){
     memset(argv[2],'*',strlen(argv[2]));
     /* acc_trunk: static trunk toward Asterisk (no registration) */
     { pjsua_acc_config c; pjsua_acc_config_default(&c);
-      char idbuf[128]; pj_ansi_snprintf(idbuf,sizeof(idbuf),"sip:jiobridge@%s:%d",bridge_ts,TRUNK_PORT);
-      c.id=pj_str(idbuf); c.reg_uri=pj_str((char*)""); c.transport_id=tid_udp;
+      char idbuf[160]; pj_ansi_snprintf(idbuf,sizeof(idbuf),"sip:jiobridge@%s:%d%s",bridge_ts,TRUNK_PORT,
+                                        g_trunk_tcp ? ";transport=tcp" : "");
+      c.id=pj_str(idbuf); c.reg_uri=pj_str((char*)""); c.transport_id=tid_trunk;
       /* Pin trunk-leg RTP to the overlay interface (so Asterisk over the tunnel can route audio back) */
       pjsua_transport_config_default(&c.rtp_cfg); c.rtp_cfg.port=5000; c.rtp_cfg.bound_addr=pj_str((char*)bridge_ts); c.rtp_cfg.public_addr=pj_str((char*)bridge_ts);
       st=pjsua_acc_add(&c,PJ_FALSE,&g_acc_trunk); if(st!=PJ_SUCCESS) err("acc_trunk",st); }
-    PJ_LOG(3,(THIS_FILE,"B2BUA up: acc_jio=%d acc_trunk=%d trunk=%s:%d asterisk=%s early_answer=%d",g_acc_jio,g_acc_trunk,bridge_ts,TRUNK_PORT,g_asterisk,g_early_answer));
+    PJ_LOG(3,(THIS_FILE,"B2BUA up: acc_jio=%d acc_trunk=%d trunk=%s:%d/%s asterisk=%s early_answer=%d",g_acc_jio,g_acc_trunk,bridge_ts,TRUNK_PORT,g_trunk_tcp?"tcp":"udp",g_asterisk,g_early_answer));
     for(;;) pj_thread_sleep(3600000);
 }

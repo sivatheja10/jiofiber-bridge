@@ -331,6 +331,7 @@ For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP por
 - **iOS softphone stops ringing after a while** = backgrounded Linphone/Zoiper dropped registration. Use Groundwire (push).
 - **~0.5 s latency** is inherent to the geographic round-trip + AMR framing; not a bug.
 - **Overlay via DERP relay** adds latency — prefer a direct path; the health check warns about this.
+- **Asterisk running in Docker Desktop on Windows/WSL** — Docker delivers inbound UDP to the container but doesn't return the container's UDP replies, so the bridge's INVITE lands, Asterisk answers, and the answer never arrives. Set **`TRUNK_SIP_TRANSPORT=tcp`** in `bridge.env` so the trunk leg runs over TCP end-to-end (one outbound-initiated connection, no broken inbound-reply path). Also make sure Asterisk's `pjsip.conf` doesn't advertise the container-internal address in the dialog `Contact` — remove any `local_net` on the trunk endpoint so the address rewrite isn't suppressed (otherwise the bridge's `ACK` for the `200 OK` never arrives, the `200` retransmits until Timer H, and the call dies at ~38 s with `cause=18`).
 
 ---
 
