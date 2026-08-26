@@ -86,8 +86,10 @@ to other IMS/VoLTE routers that log the digest.
 - **Root/admin on your own router** over SSH `:22` (dropbear) or telnet `:23`.
 - The router logs an authenticated SIP `REGISTER` (most ENG/debug voice builds do). If none
   is present, trigger a fresh registration (restart the voice app) and re-run.
-- `python3` on your PC for `jfv-credfind.py`; busybox `strings`/`dd`/`grep`/`md5sum` on the
-  box for `jfv-credfind.sh`.
+- `python3` on your PC for `jfv-credfind.py`; busybox `strings`/`dd`/`grep`/`md5sum`/`awk`
+  on the box for `jfv-credfind.sh`. Both scripts work on stripped-down busybox firmwares
+  that lack `printf` and `head` (e.g. some JCOW404-family builds) — they use `awk` as a
+  portable "print with no trailing newline" primitive.
 
 ## Troubleshooting
 
@@ -96,4 +98,4 @@ to other IMS/VoLTE routers that log the digest.
 | `couldn't get a clean session` | wrong IP/password, or a flaky link — try `--telnet`, raise `--tries` |
 | `no authenticated SIP digest found` | the voice daemon isn't logging digests, or the log wasn't located — restart the voice app to force a fresh `REGISTER`, then retry |
 | `no candidate tokens` | the voice process wasn't found or its memory wasn't readable (need root) |
-| `no memory token reproduced any digest` | the plaintext may be held only briefly around a `REGISTER` — re-run right after a fresh registration |
+| `no memory token reproduced any digest` | the plaintext may be held only briefly around a `REGISTER` — re-run right after a fresh registration. If you've forked the `.sh`, **do not replace the `awk`/`putf` primitive with `echo -n`** — `echo -n` behaviour varies by shell and a stray trailing newline makes every hash mismatch even when the password is present in memory. |

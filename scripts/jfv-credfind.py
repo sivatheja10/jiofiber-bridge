@@ -42,10 +42,16 @@ METHODS = ("REGISTER", "INVITE", "SUBSCRIBE", "PUBLISH", "MESSAGE", "OPTIONS")
 # It DISCOVERS the SIP log + voice process instead of hard-coding them, with a fast-path for
 # the known JioFiber layout. Everything is bounded (maxdepth/size) so it can't run away.
 REMOTE = r'''
+# putf: portable "print string with no trailing newline" (some stripped busybox
+# firmwares — e.g. JCOW404-family — lack `printf`; `echo -n` is shell-dependent).
+# awk is universal in busybox; the string is passed via env (not `awk -v`) so
+# backslashes/quotes in values are byte-exact preserved.
+putf(){ _s="$1" awk 'BEGIN{ printf "%s", ENVIRON["_s"] }'; }
+
 # --- 1. the SIP log(s): fast-path the known path, else discover by content ---
 LOGS=$(ls /tmp/juicelogs/*.txt 2>/dev/null)
 [ -z "$LOGS" ] && LOGS=$(find /tmp /var /nvram /flash /pfrm2.0 /opt /mnt /data /usr/local 2>/dev/null \
-  -maxdepth 4 -type f -size -8192k 2>/dev/null | xargs grep -lE 'Authorization: *Digest' 2>/dev/null | head -20)
+  -maxdepth 4 -type f -size -8192k 2>/dev/null | xargs grep -lE 'Authorization: *Digest' 2>/dev/null | sed -n '1,20p')
 echo DIAG_LOGS="$(echo $LOGS)"
 echo AUTH_BEGIN
 grep -hE 'Authorization: *Digest' $LOGS 2>/dev/null | grep 'response=' | sort -u
@@ -53,10 +59,10 @@ echo AUTH_END
 
 # --- 2. identity/realm from provisioning (display only; verification uses the header) ---
 XML=$(cat /flash/juice/*.dat /pfrm2.0/etc/juice/*.dat 2>/dev/null)
-[ -z "$XML" ] && XML=$(cat $(grep -rlE 'Private_User_Identity|name="Realm"|LBO_P-CSCF' /flash /pfrm2.0 /nvram /etc 2>/dev/null | head -1) 2>/dev/null)
-U=$(printf '%s' "$XML"|grep -o 'name="UserName" value="[^"]*"'|head -1|sed 's/.*value="//;s/"//')
-[ -z "$U" ]&&U=$(printf '%s' "$XML"|grep -o 'Private_User_Identity[^>]*value="[^"]*"'|head -1|sed 's/.*value="//;s/"//;s/^sip://')
-R=$(printf '%s' "$XML"|grep -o 'name="Realm" value="[^"]*"'|head -1|sed 's/.*value="//;s/"//')
+[ -z "$XML" ] && XML=$(cat $(grep -rlE 'Private_User_Identity|name="Realm"|LBO_P-CSCF' /flash /pfrm2.0 /nvram /etc 2>/dev/null | sed -n '1p') 2>/dev/null)
+U=$(putf "$XML" | grep -o 'name="UserName" value="[^"]*"' | sed -n '1p' | sed 's/.*value="//;s/"//')
+[ -z "$U" ] && U=$(putf "$XML" | grep -o 'Private_User_Identity[^>]*value="[^"]*"' | sed -n '1p' | sed 's/.*value="//;s/"//;s/^sip://')
+R=$(putf "$XML" | grep -o 'name="Realm" value="[^"]*"' | sed -n '1p' | sed 's/.*value="//;s/"//')
 echo IDENTITY=$U
 echo REALM=$R
 
@@ -74,10 +80,10 @@ echo DIAG_PIDS="$(echo $PIDS)"
 : > /tmp/jfv-heap.bin
 for P in $PIDS; do
   for TAG in [heap] [stack]; do
-    L=$(grep -F "$TAG" /proc/$P/maps 2>/dev/null | head -1); [ -z "$L" ] && continue
+    L=$(grep -F "$TAG" /proc/$P/maps 2>/dev/null | sed -n '1p'); [ -z "$L" ] && continue
     a=$(echo "$L"|cut -d- -f1); b=$(echo "$L"|cut -d' ' -f1|cut -d- -f2)
     sp=$((0x$a/4096)); c=$(((0x$b-0x$a)/4096))
-    [ "$c" -gt 0 ]&&[ "$c" -lt 24576 ]&&dd if=/proc/$P/mem bs=4096 skip=$sp count=$c 2>/dev/null >> /tmp/jfv-heap.bin
+    [ "$c" -gt 0 ] && [ "$c" -lt 24576 ] && dd if=/proc/$P/mem bs=4096 skip=$sp count=$c 2>/dev/null >> /tmp/jfv-heap.bin
   done
 done
 echo STR_BEGIN
