@@ -27,6 +27,28 @@ that can reach the router IP (on the LAN, or via your overlay/VPN).
 
 Scope/ethics: a line YOU own only. Every value is yours; nothing transfers between lines.
 The recovered password is your secret — never commit or share it.
+
+---- NOTES FOR HUMANS *AND* LLMs MODIFYING THIS SCRIPT ----
+The most common ways this recovery gets subtly broken when someone re-writes it:
+  1. In the REMOTE shell block, DO NOT swap `putf` / `printf '%s'` for `echo -n` —
+     `echo -n` behaviour is shell-dependent; some shells append a newline. In the
+     .sh variant a stray newline makes every HA1/HA2/response mismatch even when
+     the correct password is right there in memory. This script keeps hashing on
+     the Python side (byte-exact), so the trap is confined to the .sh — but if you
+     port this back to shell, use awk (`putf`), never `echo -n`.
+  2. Use the realm from the `Authorization:` HEADER for HA1, not the provisioning
+     XML's `<Realm>` — the digest response is computed against the header realm and
+     the two can differ on some builds/circles. `verify()` below does this correctly.
+  3. Honour `algorithm=`. Default MD5. `MD5-sess` computes HA1 differently:
+     HA1 = MD5( MD5(user:realm:pass) : nonce : cnonce ). `AKAv[12]-MD5*` means
+     SIM-based IMS-AKA — the response is Milenage-derived, not a static password,
+     and CANNOT be memory-scraped. `verify()` handles both.
+  4. `head -N` is missing on some stripped busybox firmwares (e.g. JCOW404); the
+     REMOTE block uses `sed -n Np` instead. Same for `printf`.
+  5. If it prints "no memory token reproduced any digest" on someone's line, ask
+     them to re-run with `--debug` and post THAT output — algorithm/realm/qop are
+     right there, and the AUTH lines are already redacted (nonce/response/cnonce
+     masked) so it's safe to share in a bug report.
 """
 import sys, os, re, time, socket, hashlib, argparse
 
@@ -151,8 +173,16 @@ def telnet_run(host, user, pw, cmd):
 def between(out, a, b):
     return out.split(a, 1)[1].split(b, 1)[0] if a in out and b in out.split(a, 1)[1] else ""
 
+AKA_ALGOS = ("AKAv1-MD5", "AKAv2-MD5", "AKAv1-MD5-sess", "AKAv2-MD5-sess")
+
 def verify(authlines, toks):
-    """Try each digest line × each SIP method against the token set. Return (pw, un, realm, method)."""
+    """Try each digest line × each SIP method against the token set.
+    Returns:
+      (pw, un, realm, method, algo)  -- verified match
+      ("__AKA__", algo)              -- line uses SIM-based IMS-AKA (unrecoverable)
+      None                           -- no line matched
+    """
+    aka_seen = None
     for auth in authlines:
         d = dict(re.findall(r'(\w+)="([^"]*)"', auth))
         d.update(dict(re.findall(r'(\w+)=([^",\s]+)', auth)))
@@ -161,14 +191,20 @@ def verify(authlines, toks):
         if not (resp and realm and un and nonce and uri):
             continue
         nc = d.get("nc", "00000001"); cnonce = d.get("cnonce", ""); qop = d.get("qop", "")
+        algo = d.get("algorithm", "MD5")
+        if algo in AKA_ALGOS:
+            aka_seen = algo; continue                          # skip; try any non-AKA lines
+        sess = (algo == "MD5-sess")
         for m in METHODS:
             ha2 = md5("%s:%s" % (m, uri))
             for c in toks:
                 ha1 = md5("%s:%s:%s" % (un, realm, c))
+                if sess: ha1 = md5("%s:%s:%s" % (ha1, nonce, cnonce))
                 r = (md5("%s:%s:%s:%s:%s:%s" % (ha1, nonce, nc, cnonce, qop, ha2)) if qop
                      else md5("%s:%s:%s" % (ha1, nonce, ha2)))
                 if r == resp:
-                    return c, un, realm, m
+                    return c, un, realm, m, algo
+    if aka_seen: return ("__AKA__", aka_seen)
     return None
 
 def main():
@@ -178,7 +214,12 @@ def main():
     ap.add_argument("--user", default="root")
     ap.add_argument("--telnet", action="store_true", help="use telnet :23 instead of SSH :22")
     ap.add_argument("--tries", type=int, default=4, help="connection attempts (flaky links)")
+    ap.add_argument("--debug", action="store_true",
+                    help="print redacted AUTH lines, algorithm+realm per line, and token-count breakdown "
+                         "(no secrets — nonce/response/cnonce are masked). Attach the output to a bug report.")
     a = ap.parse_args()
+    def dbg(m):
+        if a.debug: print("[debug]", m)
     run = telnet_run if a.telnet else ssh_run
     print("[+] connecting to %s@%s (%s)…" % (a.user, a.host, "telnet" if a.telnet else "ssh"))
     out = None
@@ -210,6 +251,24 @@ def main():
         print("[+] provisioning: identity=%s realm=%s" % (re.sub(r"\d", "#", ident) or "?", realm or "?"))
     print("[+] %d authenticated digest line(s), %d candidate tokens from memory"
           % (len(authlines), len(toks)))
+    # Per-line summary of algorithm+realm — always print if we have any auth lines.
+    # This alone diagnoses the top-3 failure modes (MD5-sess/AKA/realm-mismatch).
+    for i, auth in enumerate(authlines[-3:]):
+        d = dict(re.findall(r'(\w+)="([^"]*)"', auth))
+        d.update(dict(re.findall(r'(\w+)=([^",\s]+)', auth)))
+        print("      digest[%d]: algorithm=%s realm=%s qop=%s"
+              % (i, d.get("algorithm","MD5"), d.get("realm","?"), d.get("qop","?")))
+        if a.debug:
+            red = re.sub(r'(nonce|response|cnonce)="[^"]*"', r'\1="<R>"', auth)
+            dbg("  " + red)
+
+    if a.debug:
+        dbg("token-count breakdown at various widths:")
+        raw = between(out, "STR_BEGIN", "STR_END")
+        for pat, lbl in [(r"[A-Za-z0-9._$@/+=!#-]{6,32}", "{6,32} chars +!#"),
+                         (r"[A-Za-z0-9._$@/+=-]{8,24}",   "{8,24} chars (old)"),
+                         (r"[A-Za-z0-9._$@/+=-]{4,64}",   "{4,64} chars (wide)")]:
+            dbg("  %-24s unique: %d" % (lbl, len(set(re.findall(pat, raw)))))
 
     # --- guidance if a step came up empty ---
     if not authlines:
@@ -221,11 +280,15 @@ def main():
                  "   The voice daemon wasn't found or its heap wasn't readable (need root).")
 
     hit = verify(authlines, toks)
+    if hit and hit[0] == "__AKA__":
+        sys.exit("!! algorithm=%s — this line uses SIM-based IMS-AKA (Milenage), not plain\n"
+                 "   MD5 digest. The response is derived on the SIM, not from a static password.\n"
+                 "   Password recovery via memory scraping does not apply here — sorry." % hit[1])
     if hit:
-        c, un, realm2, method = hit
+        c, un, realm2, method, algo = hit
         print("\n" + "=" * 52)
         print("  ✅ VERIFIED PASSWORD:  %s" % c)
-        print("  (reproduces the box's own %s digest)" % method)
+        print("  (reproduces the box's own %s digest, algorithm=%s)" % (method, algo))
         print("=" * 52)
         print("\nBridge env:")
         print("  IMS_IMPI=%s" % un)
@@ -233,8 +296,16 @@ def main():
         print("  SIP_REALM=%s" % realm2)
         return
     sys.exit("!! no memory token reproduced any digest.\n"
-             "   The password may be held obfuscated between REGISTERs — re-run IMMEDIATELY after a\n"
-             "   fresh REGISTER (restart the voice app, wait ~5s), or widen TOKRE's length/charset.")
+             "   Diagnostic pointers, in order of likelihood:\n"
+             "   1. Re-run IMMEDIATELY after a fresh REGISTER — some firmwares hold the\n"
+             "      plaintext only briefly around a REGISTER and scrub it in between.\n"
+             "      Kill the voice daemon (it respawns) and run this again within seconds.\n"
+             "   2. Run with --debug to see per-line algorithm/realm/qop. MD5-sess is\n"
+             "      handled automatically; AKAv[12]-MD5 cannot be recovered this way.\n"
+             "   3. Widen the token filter in TOKRE (default {8,24}) if your password\n"
+             "      might be shorter/longer or use uncommon chars.\n"
+             "   4. If you file an issue, please attach the FULL --debug output — the\n"
+             "      nonce/response/cnonce are already redacted so it's safe to share.")
 
 if __name__ == "__main__":
     main()

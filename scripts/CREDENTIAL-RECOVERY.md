@@ -98,4 +98,47 @@ to other IMS/VoLTE routers that log the digest.
 | `couldn't get a clean session` | wrong IP/password, or a flaky link — try `--telnet`, raise `--tries` |
 | `no authenticated SIP digest found` | the voice daemon isn't logging digests, or the log wasn't located — restart the voice app to force a fresh `REGISTER`, then retry |
 | `no candidate tokens` | the voice process wasn't found or its memory wasn't readable (need root) |
-| `no memory token reproduced any digest` | the plaintext may be held only briefly around a `REGISTER` — re-run right after a fresh registration. If you've forked the `.sh`, **do not replace the `awk`/`putf` primitive with `echo -n`** — `echo -n` behaviour varies by shell and a stray trailing newline makes every hash mismatch even when the password is present in memory. |
+| `no memory token reproduced any digest` | See the section below. |
+
+## When it doesn't work — diagnosis in one round-trip
+
+Run with **`--debug`** (`.py`) or **`JFV_DEBUG=1`** (`.sh`). The extra output includes:
+
+- **`algorithm=…`** per digest line — the single highest-signal field. Plain `MD5` is the
+  usual case. `MD5-sess` is handled automatically. **`AKAv1-MD5` or `AKAv2-MD5`** means
+  your line uses **SIM-based IMS-AKA** — the response is derived from Milenage on the SIM,
+  not a static password. Memory scraping **cannot recover it** on that line, no matter what
+  you patch. Rare on fixed lines; common on mobile.
+- **`realm=…` from the `Authorization` header** — the digest response is computed against
+  the *header* realm, which sometimes differs from the provisioning XML's `<Realm>`. The
+  scripts use the header realm; the debug output makes it visible when they differ.
+- **A redacted copy of the `Authorization` line** (nonce/response/cnonce masked) — reveals
+  any exotic field format that the extractor doesn't match.
+- **Token-count breakdown at a few charset widths** — if `{4,64}` yields dramatically more
+  than `{8,24}`, your password may be shorter/longer/contain unusual chars, and widening
+  the filter can help.
+- **rw-region map of the voice daemon** — reveals whether the process has large `[anon]`
+  regions we're not dumping. Currently only `[heap]` and `[stack]` are scraped.
+
+**Two limits to be honest about:**
+
+1. **Some firmwares hold the credential encrypted at rest**, only decrypting it during a
+   live `REGISTER` window. In that case the plaintext isn't in scannable memory except for
+   a few seconds around a registration. Kill the voice daemon (it respawns) and re-run
+   this script within seconds.
+2. **SIM-based IMS-AKA lines are out of scope for this recovery approach.** If `--debug`
+   shows `algorithm=AKAv[12]-MD5*`, no amount of script tweaking will help — that's a
+   different technique (SIM-based challenge/response, not password-derived).
+
+**Forking the `.sh`?** Two traps that have burned people:
+
+- **Do not replace the `awk`/`putf` primitive with `echo -n`.** `echo -n` behaviour is
+  shell-dependent; some shells append a newline. A stray trailing newline makes every
+  `HA1`/`HA2`/`response` mismatch **even when the correct password is right there in
+  memory** (this is bug #4).
+- **Don't drop the `sed -n Np` substitutions for `head -N`.** Some stripped busybox
+  firmwares (e.g. JCOW404-family) lack `head` entirely; the `sed` form works everywhere.
+
+Please attach the full `--debug` / `JFV_DEBUG=1` output when filing an issue — it's
+already redacted (no secrets) and contains everything the maintainer needs to diagnose in
+one round-trip.

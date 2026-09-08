@@ -11,3 +11,7 @@ jio_b2bua
 # Editor noise
 *.swp
 .DS_Store
+
+# Python bytecode caches
+__pycache__/
+*.pyc
