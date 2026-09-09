@@ -58,17 +58,19 @@ jobs:
           make dep >/dev/null && make >/dev/null && make install >/dev/null
           echo "PKG_CONFIG_PATH=$PWD/_install/lib/pkgconfig" >> "$GITHUB_ENV"
 
-      - name: Compile jio_b2bua.c against pjproject
+      - name: Compile-check jio_b2bua.c against pjproject
         run: |
           set -eux
-          # jio_b2bua.c only uses the standard pjsua API (the patches in patches/ change
-          # runtime behaviour, not the API surface), so a stock build is enough to catch
-          # API/typo errors in new env-gated features.
-          # Link against the static pjproject libs PLUS the external deps pjproject itself
-          # pulls in (OpenSSL for SIP digest, alsa/uuid/pthread/m). `pkg-config --libs`
-          # emits only the pj libs; the private deps must follow them for static linking.
-          gcc -Wall -o /tmp/jio_b2bua b2bua/jio_b2bua.c \
-            $(pkg-config --cflags --libs libpjproject) \
-            -lssl -lcrypto -luuid -lasound -lm -lpthread \
-            || { echo "::error::jio_b2bua.c failed to compile/link against pjproject ${PJ_VERSION}"; exit 1; }
-          echo "jio_b2bua.c compiled + linked clean."
+          # Compile-only (-c), not a full link. This catches every syntax/type/API/typo
+          # error in OUR code — including calling a pjsua function or naming a struct
+          # field that doesn't exist (pjsua.h declares the real API, so a wrong name is
+          # a hard error with -Werror=implicit-function-declaration). We deliberately do
+          # NOT link a full executable: that would drag in pjproject's entire transitive
+          # dependency chain (OpenSSL, GSM/Speex/iLBC codecs, …), which is pjproject's
+          # concern, not a check of jio_b2bua.c. The patches in patches/ change runtime
+          # behaviour, not the API surface, so a stock build is the correct target.
+          gcc -Wall -Werror=implicit-function-declaration -c \
+            b2bua/jio_b2bua.c -o /tmp/jio_b2bua.o \
+            $(pkg-config --cflags libpjproject) \
+            || { echo "::error::jio_b2bua.c failed to compile against pjproject ${PJ_VERSION}"; exit 1; }
+          echo "jio_b2bua.c compiled clean."
