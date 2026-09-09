@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  # Fast, always-reliable checks. These must pass.
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Python compiles
+        run: python3 -m py_compile scripts/*.py
+
+      - name: verify() unit tests
+        run: python3 tests/test_verify.py
+
+      - name: Shell scripts parse (POSIX sh)
+        run: for f in scripts/*.sh; do echo "-- $f"; sh -n "$f"; done
+
+      - name: ShellCheck (informational)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning scripts/*.sh || true
+
+  # Best-effort compile of the B2BUA against stock pjproject. The runtime patches in
+  # patches/ change behaviour, not the pjsua API surface jio_b2bua.c uses, so a stock
+  # build is enough to catch API/typo errors (e.g. a bad field name in a new env-gated
+  # feature). continue-on-error so pjproject build/network flakiness can't block a PR;
+  # a red X here means "look at the C", a green check means "the C compiles clean".
+  build-b2bua:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libssl-dev libasound2-dev uuid-dev pkg-config
+
+      - name: Build + install stock pjproject
+        env:
+          PJ_VERSION: "2.14.1"
+        run: |
+          set -eux
+          curl -fsSL -o pj.tgz "https://github.com/pjsip/pjproject/archive/refs/tags/${PJ_VERSION}.tar.gz"
+          tar xzf pj.tgz
+          mv "pjproject-${PJ_VERSION}" pj
+          cd pj
+          ./configure --prefix="$PWD/_install" --disable-video >/dev/null
+          make dep >/dev/null && make >/dev/null && make install >/dev/null
+          echo "PKG_CONFIG_PATH=$PWD/_install/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Compile jio_b2bua.c against pjproject
+        run: |
+          set -eux
+          # jio_b2bua.c only uses the standard pjsua API (the patches in patches/ change
+          # runtime behaviour, not the API surface), so a stock build is enough to catch
+          # API/typo errors in new env-gated features.
+          gcc -Wall -o /tmp/jio_b2bua b2bua/jio_b2bua.c \
+            $(pkg-config --cflags --libs libpjproject) \
+            || { echo "::error::jio_b2bua.c failed to compile against pjproject ${PJ_VERSION}"; exit 1; }
+          echo "jio_b2bua.c compiled clean."

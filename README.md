@@ -1,5 +1,8 @@
 # jiofiber-bridge
 
+[![CI](https://github.com/sivatheja10/jiofiber-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/sivatheja10/jiofiber-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Use your JioFiber landline from anywhere in the world — outbound *and* inbound — on an ordinary SIP app.**
 
 JioFiber (and other Jio Fiber Voice / "JioCall over broadband" lines) delivers voice through Jio's IMS core using a proprietary client called **JUICE** that normally only runs on the ISP-supplied router or the JioCall app. This project puts a small headless **bridge** on the same LAN as the router, registers to the IMS core exactly the way a genuine JioCall device does, and re-presents the line as a plain SIP trunk. Point Asterisk at that trunk and any softphone (Zoiper, Groundwire, Linphone, a desk phone) can place and receive calls on the landline from any network on earth.
