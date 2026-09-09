@@ -33,7 +33,7 @@
  *     asterisk_overlay_ip  = Asterisk's overlay IP               -> where inbound calls go
  *     bridge_lan_ip        = this host's LAN IP on the router subnet -> JUICE-leg RTP
  *
- * DIRECT-IMS mode: setting DIRECT_IMS=1 (plus the IMS_*/PCSCF_V6/JIO_LAN_V6 env
+ * DIRECT-IMS mode: setting DIRECT_IMS=1 (plus the IMS_*, PCSCF_V6, JIO_LAN_V6 env
  * vars, see DIRECT-IMS.md) switches leg A to register directly to the IMS core's
  * P-CSCF over TLS/IPv6 instead of to the router's JUICE server. In direct mode the
  * Jio-leg identity/password come from the IMS_* env vars, so argv[1]/argv[2]/argv[5]
