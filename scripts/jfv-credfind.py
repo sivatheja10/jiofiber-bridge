@@ -98,11 +98,21 @@ if [ -z "$(echo $PIDS)" ]; then
 fi
 echo DIAG_PIDS="$(echo $PIDS)"
 
-# --- 4. dump [heap]+[stack] of each candidate, strings them (busybox-safe) ---
+# --- 4. dump writable regions of each candidate, strings them ---
+# Default ($WIDE=0): [heap]+[stack] only (fast, and where the credential usually is).
+# $WIDE=1 (--wide): every ANONYMOUS rw-p region (no pathname or [bracket] tag) — catches
+# a credential in a malloc arena outside the main heap. Either way skip file-/device-
+# backed maps (reading /dev/... can BLOCK; file maps don't hold the runtime credential).
 : > /tmp/jfv-heap.bin
 for P in $PIDS; do
-  for TAG in [heap] [stack]; do
-    L=$(grep -F "$TAG" /proc/$P/maps 2>/dev/null | sed -n '1p'); [ -z "$L" ] && continue
+  # match private-writable with OR without the exec bit — JioFiber ONT [heap] is `rwxp`
+  grep -E ' rw[-x]p ' /proc/$P/maps 2>/dev/null | while read L; do
+    path=$(echo "$L"|awk '{print $6}')
+    if [ "${WIDE:-0}" = "1" ]; then
+      case "$path" in "" | \[*\]) : ;; *) continue ;; esac
+    else
+      case "$path" in "[heap]" | "[stack]") : ;; *) continue ;; esac
+    fi
     a=$(echo "$L"|cut -d- -f1); b=$(echo "$L"|cut -d' ' -f1|cut -d- -f2)
     sp=$((0x$a/4096)); c=$(((0x$b-0x$a)/4096))
     [ "$c" -gt 0 ] && [ "$c" -lt 24576 ] && dd if=/proc/$P/mem bs=4096 skip=$sp count=$c 2>/dev/null >> /tmp/jfv-heap.bin
@@ -217,7 +227,12 @@ def main():
     ap.add_argument("--debug", action="store_true",
                     help="print redacted AUTH lines, algorithm+realm per line, and token-count breakdown "
                          "(no secrets — nonce/response/cnonce are masked). Attach the output to a bug report.")
+    ap.add_argument("--wide", action="store_true",
+                    help="dump ALL anonymous writable regions, not just [heap]+[stack] — try this if the "
+                         "default reports no match (slower on weak CPUs; the credential may live in a "
+                         "malloc arena outside the main heap on some firmwares).")
     a = ap.parse_args()
+    remote = ("WIDE=1\n" if a.wide else "WIDE=0\n") + REMOTE
     def dbg(m):
         if a.debug: print("[debug]", m)
     run = telnet_run if a.telnet else ssh_run
@@ -225,7 +240,7 @@ def main():
     out = None
     for i in range(a.tries):
         try:
-            out = run(a.host, a.user, a.password, REMOTE)
+            out = run(a.host, a.user, a.password, remote)
         except Exception as e:
             out = None; print("    attempt %d: %s" % (i + 1, e))
         if out and "STR_END" in out and "AUTH_END" in out:
@@ -302,9 +317,11 @@ def main():
              "      Kill the voice daemon (it respawns) and run this again within seconds.\n"
              "   2. Run with --debug to see per-line algorithm/realm/qop. MD5-sess is\n"
              "      handled automatically; AKAv[12]-MD5 cannot be recovered this way.\n"
-             "   3. Widen the token filter in TOKRE (default {8,24}) if your password\n"
+             "   3. Run with --wide to dump all anonymous regions (not just heap/stack)\n"
+             "      — the credential may live in a malloc arena outside the main heap.\n"
+             "   4. Widen the token filter in TOKRE (default {8,24}) if your password\n"
              "      might be shorter/longer or use uncommon chars.\n"
-             "   4. If you file an issue, please attach the FULL --debug output — the\n"
+             "   5. If you file an issue, please attach the FULL --debug output — the\n"
              "      nonce/response/cnonce are already redacted so it's safe to share.")
 
 if __name__ == "__main__":

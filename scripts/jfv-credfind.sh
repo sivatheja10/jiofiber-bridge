@@ -38,6 +38,11 @@
 # ----
 set -u
 DEBUG="${JFV_DEBUG:-0}"
+# JFV_WIDE=1 dumps ALL anonymous writable regions instead of just [heap]+[stack].
+# Off by default: on a slow ONT (600 MHz MIPS) dumping+`strings`ing tens of MB is slow.
+# Turn it on if the default reports "no memory token" — the credential may live in a
+# malloc arena outside the main heap (seen on JCOW404-family builds).
+WIDE="${JFV_WIDE:-0}"
 dbg(){ [ "$DEBUG" = "1" ] && echo "[debug] $*"; }
 
 # putf: print $1 to stdout with NO trailing newline, byte-exact.
@@ -108,9 +113,9 @@ PID=$(pidof hgw-voice-app 2>/dev/null | awk '{print $1}')
 echo "[+] JUICE pid: $PID"
 DUMP=/tmp/jfv-heap.$$; : > "$DUMP"
 if [ "$DEBUG" = "1" ]; then
-  dbg "process memory map (rw regions, sizes only — no addresses):"
+  dbg "process memory map (writable regions, sizes only — no addresses):"
   # busybox awk lacks strtonum; do the hex math in the shell.
-  grep 'rw-p ' /proc/$PID/maps 2>/dev/null | while read L; do
+  grep -E ' rw[-x]p ' /proc/$PID/maps 2>/dev/null | while read L; do
     ah=$(echo "$L"|cut -d- -f1); bh=$(echo "$L"|cut -d' ' -f1|cut -d- -f2)
     sz=$(( (0x$bh - 0x$ah) / 1024 ))
     kind=$(echo "$L"|awk '{print $NF}'); case "$kind" in \[*\]) : ;; *) kind='[anon]';; esac
@@ -118,11 +123,20 @@ if [ "$DEBUG" = "1" ]; then
     _kind="$kind" _sz="$sz" awk 'BEGIN{ printf "[debug]   %-8s %6d KiB\n", ENVIRON["_kind"], ENVIRON["_sz"] }'
   done | sort -u
 fi
-# dd the named anonymous regions that hold the credential ([heap], [stack]), page-aligned.
-# (Iterating ALL rw-p regions can BLOCK on a device-backed map and hang the dump — so we
-#  target only the named regions, which are readable and where the password actually lives.)
-for TAG in '[heap]' '[stack]'; do
-  line=$(grep -F "$TAG" /proc/$PID/maps | first); [ -z "$line" ] && continue
+# Default: dump [heap]+[stack] (fast, and where the credential usually lives).
+# JFV_WIDE=1: dump every ANONYMOUS writable region (rw-p with no pathname or a
+# [bracket] tag) — catches a credential in a malloc arena outside the main heap.
+# Either way we SKIP file-/device-backed maps: reading a device map (/dev/...) can
+# BLOCK and hang the dump, and file maps don't hold the runtime credential.
+# Match private-writable perms with OR without the exec bit — on JioFiber ONTs the
+# [heap] is `rwxp` (executable!), so a plain ` rw-p ` grep would miss it entirely.
+grep -E ' rw[-x]p ' /proc/$PID/maps 2>/dev/null | while read line; do
+  path=$(echo "$line" | awk '{print $6}')
+  if [ "$WIDE" = "1" ]; then
+    case "$path" in "" | \[*\]) : ;; *) continue ;; esac       # any anonymous region
+  else
+    case "$path" in "[heap]" | "[stack]") : ;; *) continue ;; esac
+  fi
   a=$(echo "$line" | cut -d- -f1); b=$(echo "$line" | cut -d' ' -f1 | cut -d- -f2)
   sp=$(( 0x$a / 4096 )); cnt=$(( (0x$b - 0x$a) / 4096 ))
   [ "$cnt" -gt 0 ] && [ "$cnt" -lt 24576 ] && \
@@ -177,9 +191,9 @@ cat <<'MSG'
       diagnostic will name it; if AKAv[12]-MD5 this recovery approach cannot work
       on your line (SIM-based) and no patching will help.
    3. XML realm ≠ header realm? `JFV_DEBUG=1` prints both.
-   4. Password might live in a memory region we don't dump (only [heap]+[stack]
-      today). `JFV_DEBUG=1` prints the full rw-region map — if the process has
-      large [anon] regions we're skipping, that's a lead.
+   4. Password might live outside [heap]+[stack] (a malloc arena). Re-run with
+      `JFV_WIDE=1 sh jfv-credfind.sh` to dump ALL anonymous regions (slower on a
+      weak CPU). `JFV_DEBUG=1` prints the full rw-region map so you can see them.
    5. If you file an issue, please attach the FULL `JFV_DEBUG=1` output — it's
       already redacted (nonce/response/cnonce masked) and contains no secrets.
 MSG
