@@ -24,10 +24,13 @@ router's own SIP `REGISTER` digest** — a cryptographic match, not a guess.
 
 ```bash
 # needs Python 3.8+ (uv or plain python3); no pip installs
-uv run jfv-credfind.py <router-ip> <router-password>
-#   e.g.  uv run jfv-credfind.py 192.168.29.1 myrouterpw
-#   telnet instead of ssh:   ... 192.168.29.1 myrouterpw --telnet
-#   different login user:    ... 192.168.29.1 myrouterpw --user root
+uv run jfv-credfind.py <router-ip> [router-password]
+#   prompts for the password (kept out of `ps`/shell history):
+#         uv run jfv-credfind.py 192.168.29.1
+#   or via env:   JFV_ROUTER_PW=myrouterpw uv run jfv-credfind.py 192.168.29.1
+#   or as an arg (visible in `ps`):   uv run jfv-credfind.py 192.168.29.1 myrouterpw
+#   telnet instead of ssh:   ... 192.168.29.1 --telnet
+#   different login user:    ... 192.168.29.1 --user root
 ```
 
 (`192.168.29.1` is the usual JioFiber gateway; use whatever your router's LAN IP is.)

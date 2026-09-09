@@ -5,10 +5,12 @@
 """
 jfv-credfind.py — recover & VERIFY your IMS/VoLTE SIP digest password, from your PC.
 
-    uv run jfv-credfind.py <router-ip> <router-password>
-    uv run jfv-credfind.py 192.168.29.1 myrouterpw
-    uv run jfv-credfind.py 192.168.29.1 myrouterpw --telnet      # if the ONT uses telnet :23
-    uv run jfv-credfind.py 192.168.29.1 myrouterpw --user root
+    uv run jfv-credfind.py <router-ip> [router-password]
+    uv run jfv-credfind.py 192.168.29.1                          # prompts for the password (not in `ps`)
+    JFV_ROUTER_PW=myrouterpw uv run jfv-credfind.py 192.168.29.1 # or via env
+    uv run jfv-credfind.py 192.168.29.1 myrouterpw               # or as an arg (visible in `ps`/history)
+    uv run jfv-credfind.py 192.168.29.1 --telnet                 # if the ONT uses telnet :23
+    uv run jfv-credfind.py 192.168.29.1 --user root
 
 Reaches into YOUR OWN carrier ONT/router over SSH (dropbear :22) or telnet (:23) and asks it
 to do only what MUST run on the box: locate the SIP log, pull every authenticated
@@ -220,7 +222,9 @@ def verify(authlines, toks):
 def main():
     ap = argparse.ArgumentParser(description="Recover your IMS/VoLTE SIP password from your own ONT/router.")
     ap.add_argument("host", help="router IP, e.g. 192.168.29.1")
-    ap.add_argument("password", help="the router's SSH/telnet root password")
+    ap.add_argument("password", nargs="?", default=None,
+                    help="the router's SSH/telnet root password. Omit to avoid exposing it in `ps`/shell "
+                         "history — it's then read from the JFV_ROUTER_PW env var, or prompted for.")
     ap.add_argument("--user", default="root")
     ap.add_argument("--telnet", action="store_true", help="use telnet :23 instead of SSH :22")
     ap.add_argument("--tries", type=int, default=4, help="connection attempts (flaky links)")
@@ -232,6 +236,17 @@ def main():
                          "default reports no match (slower on weak CPUs; the credential may live in a "
                          "malloc arena outside the main heap on some firmwares).")
     a = ap.parse_args()
+    # Resolve the password without leaving it in `ps`/shell history: positional arg
+    # (convenient but visible), else JFV_ROUTER_PW env, else an interactive prompt.
+    password = a.password or os.environ.get("JFV_ROUTER_PW")
+    if not password:
+        import getpass
+        try:
+            password = getpass.getpass("router password for %s@%s: " % (a.user, a.host))
+        except (EOFError, KeyboardInterrupt):
+            sys.exit("\n!! no password provided (arg / JFV_ROUTER_PW / prompt).")
+        if not password:
+            sys.exit("!! no password provided (arg / JFV_ROUTER_PW / prompt).")
     remote = ("WIDE=1\n" if a.wide else "WIDE=0\n") + REMOTE
     def dbg(m):
         if a.debug: print("[debug]", m)
@@ -240,7 +255,7 @@ def main():
     out = None
     for i in range(a.tries):
         try:
-            out = run(a.host, a.user, a.password, remote)
+            out = run(a.host, a.user, password, remote)
         except Exception as e:
             out = None; print("    attempt %d: %s" % (i + 1, e))
         if out and "STR_END" in out and "AUTH_END" in out:
