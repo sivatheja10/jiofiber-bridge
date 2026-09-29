@@ -38,10 +38,13 @@
 # ----
 set -u
 DEBUG="${JFV_DEBUG:-0}"
-# JFV_WIDE=1 dumps ALL anonymous writable regions instead of just [heap]+[stack].
-# Off by default: on a slow ONT (600 MHz MIPS) dumping+`strings`ing tens of MB is slow.
-# Turn it on if the default reports "no memory token" — the credential may live in a
-# malloc arena outside the main heap (seen on JCOW404-family builds).
+# JFV_WIDE=1 only WIDENS the candidate charset/length (more tokens tested, slower) —
+# it does NOT change which memory regions are scanned. The default region set already
+# covers [heap] + main [stack] + anonymous malloc arenas, which is where the credential
+# lives (on JCOW404/407 it's in an anon arena, NOT [heap]/[stack]). There is deliberately
+# no "dump every region" mode: JUICE has dozens of 8 MB per-thread stacks (~hundreds of MB,
+# almost all zero), and dumping them fills the tiny ramfs /tmp and can wedge the ONT —
+# which carries the landline. See the region selection in step 3.
 WIDE="${JFV_WIDE:-0}"
 dbg(){ [ "$DEBUG" = "1" ] && echo "[debug] $*"; }
 
@@ -111,6 +114,10 @@ esac
 PID=$(pidof hgw-voice-app 2>/dev/null | awk '{print $1}')
 [ -z "$PID" ] && { echo "!! hgw-voice-app (JUICE) not running"; exit 1; }
 echo "[+] JUICE pid: $PID"
+# Guardrail: /tmp is ramfs (shares RAM). Refuse if free RAM is too low to hold the dump
+# safely — better to bail than to fill ramfs and wedge a box that carries the landline.
+AVAIL=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null)
+[ -n "$AVAIL" ] && [ "$AVAIL" -lt 16384 ] && { echo "!! MemAvailable=${AVAIL}kB too low; refusing to dump. Free RAM and retry."; exit 2; }
 DUMP=/tmp/jfv-heap.$$; : > "$DUMP"
 if [ "$DEBUG" = "1" ]; then
   dbg "process memory map (writable regions, sizes only — no addresses):"
@@ -123,24 +130,27 @@ if [ "$DEBUG" = "1" ]; then
     _kind="$kind" _sz="$sz" awk 'BEGIN{ printf "[debug]   %-8s %6d KiB\n", ENVIRON["_kind"], ENVIRON["_sz"] }'
   done | sort -u
 fi
-# Default: dump [heap]+[stack] (fast, and where the credential usually lives).
-# JFV_WIDE=1: dump every ANONYMOUS writable region (rw-p with no pathname or a
-# [bracket] tag) — catches a credential in a malloc arena outside the main heap.
-# Either way we SKIP file-/device-backed maps: reading a device map (/dev/...) can
-# BLOCK and hang the dump, and file maps don't hold the runtime credential.
-# Match private-writable perms with OR without the exec bit — on JioFiber ONTs the
+# Regions to scan: [heap] + MAIN [stack] + anonymous malloc arenas (rw-p, EMPTY path).
+# The IMS credential lives in an anonymous arena on JCOW404/407 — NOT in [heap]/[stack] —
+# so anonymous regions MUST be included (this is the fix for the "no token" reports).
+# We ALWAYS skip per-thread stacks ([stack:TID]) and file/device maps:
+#   - JUICE spawns dozens of 8 MB thread stacks (~hundreds of MB, almost all zero-filled);
+#     dumping them fills the tiny ramfs /tmp and can wedge the ONT (it carries the landline).
+#   - reading a device map (/dev/...) can BLOCK and hang the dump; file maps hold no secret.
+# Per-region hard cap of 16 MiB, and each dd is niced so the router's forwarding path keeps
+# CPU. Match private-writable perms with OR without the exec bit — on JioFiber ONTs the
 # [heap] is `rwxp` (executable!), so a plain ` rw-p ` grep would miss it entirely.
 grep -E ' rw[-x]p ' /proc/$PID/maps 2>/dev/null | while read line; do
   path=$(echo "$line" | awk '{print $6}')
-  if [ "$WIDE" = "1" ]; then
-    case "$path" in "" | \[*\]) : ;; *) continue ;; esac       # any anonymous region
-  else
-    case "$path" in "[heap]" | "[stack]") : ;; *) continue ;; esac
-  fi
+  case "$path" in
+    "[heap]" | "[stack]" | "") : ;;   # heap, MAIN stack, anonymous arenas
+    *) continue ;;                     # skip [stack:TID] thread stacks, [vdso], file/dev maps
+  esac
   a=$(echo "$line" | cut -d- -f1); b=$(echo "$line" | cut -d' ' -f1 | cut -d- -f2)
   sp=$(( 0x$a / 4096 )); cnt=$(( (0x$b - 0x$a) / 4096 ))
-  [ "$cnt" -gt 0 ] && [ "$cnt" -lt 24576 ] && \
-    dd if=/proc/$PID/mem bs=4096 skip="$sp" count="$cnt" 2>/dev/null >> "$DUMP"
+  [ "$cnt" -gt 4096 ] && cnt=4096      # cap any single region at 16 MiB (safety)
+  [ "$cnt" -le 0 ] && continue
+  nice -n 19 dd if=/proc/$PID/mem bs=4096 skip="$sp" count="$cnt" 2>/dev/null >> "$DUMP"
 done
 # printable tokens, plausible password shape, unique. Slightly wider than tight (6-32)
 # so shorter/longer credentials from other circles/firmwares aren't silently missed.
@@ -163,24 +173,31 @@ HA2=$(md5 "REGISTER:$URI")
 # MD5-sess: session key = MD5(MD5(user:realm:pass):nonce:cnonce), used as HA1.
 # Detect once outside the hot loop.
 SESS=0; [ "$HDR_ALGO" = "MD5-sess" ] && SESS=1
+# The verify loop runs in a subshell (it reads from a pipe), so an `exit 0` here would
+# NOT terminate the parent script — the old code did that and then fell through to print
+# the failure banner even after a SUCCESS. Instead we stash the winning token in a temp
+# file and `break`, then decide success/failure ONCE in the parent below.
+HIT=/tmp/jfv-hit.$$; rm -f "$HIT"
 echo "$CANDS" | while IFS= read -r C; do
   [ -z "$C" ] && continue
   HA1=$(md5 "$UN:$REALM:$C")
   [ "$SESS" = 1 ] && HA1=$(md5 "$HA1:$NONCE:$CNONCE")
   if [ -n "$QOP" ]; then R=$(md5 "$HA1:$NONCE:$NC:$CNONCE:$QOP:$HA2"); else R=$(md5 "$HA1:$NONCE:$HA2"); fi
-  if [ "$R" = "$RESP" ]; then
-    echo ""; echo "===================================================="
-    echo "  VERIFIED PASSWORD:  $C"
-    echo "  (reproduces the ONT's own REGISTER digest)"
-    echo "===================================================="
-    echo ""; echo "Bridge env:  IMS_IMPI=$UN   IMS_PASSWORD=$C   SIP_REALM=$REALM"
-    # Opt-in only: write plaintext to /tmp for scripting. Off by default so we don't leave
-    # a live carrier credential on the disk. Set JFV_WRITE=1 if you want it.
-    [ "${JFV_WRITE:-0}" = "1" ] && { echo "$C" > /tmp/jfv-password.txt; echo "(also wrote /tmp/jfv-password.txt — delete when done)"; }
-    exit 0
-  fi
+  if [ "$R" = "$RESP" ]; then printf '%s' "$C" > "$HIT"; break; fi
 done
-[ -f /tmp/jfv-password.txt ] && exit 0
+if [ -s "$HIT" ]; then
+  C=$(cat "$HIT"); rm -f "$HIT"
+  echo ""; echo "===================================================="
+  echo "  VERIFIED PASSWORD:  $C"
+  echo "  (reproduces the ONT's own REGISTER digest)"
+  echo "===================================================="
+  echo ""; echo "Bridge env:  IMS_IMPI=$UN   IMS_PASSWORD=$C   SIP_REALM=$REALM"
+  # Opt-in only: write plaintext to /tmp for scripting. Off by default so we don't leave
+  # a live carrier credential on the disk. Set JFV_WRITE=1 if you want it.
+  [ "${JFV_WRITE:-0}" = "1" ] && { printf '%s\n' "$C" > /tmp/jfv-password.txt; echo "(also wrote /tmp/jfv-password.txt — delete when done)"; }
+  exit 0
+fi
+rm -f "$HIT"
 cat <<'MSG'
 !! no memory token reproduced the digest.
    Diagnostic pointers, in order of likelihood:
@@ -191,9 +208,11 @@ cat <<'MSG'
       diagnostic will name it; if AKAv[12]-MD5 this recovery approach cannot work
       on your line (SIM-based) and no patching will help.
    3. XML realm ≠ header realm? `JFV_DEBUG=1` prints both.
-   4. Password might live outside [heap]+[stack] (a malloc arena). Re-run with
-      `JFV_WIDE=1 sh jfv-credfind.sh` to dump ALL anonymous regions (slower on a
-      weak CPU). `JFV_DEBUG=1` prints the full rw-region map so you can see them.
+   4. The credential lives in an anonymous malloc arena on some firmwares (JCOW404/407),
+      which is now scanned by DEFAULT (along with [heap]+[stack]); per-thread stacks are
+      skipped on purpose. If it still misses, the plaintext may be held only transiently:
+      restart JUICE (pointer 1) and re-run immediately. `JFV_DEBUG=1` prints the rw-region
+      map so you can confirm the anon arenas are present.
    5. If you file an issue, please attach the FULL `JFV_DEBUG=1` output — it's
       already redacted (nonce/response/cnonce masked) and contains no secrets.
 MSG
