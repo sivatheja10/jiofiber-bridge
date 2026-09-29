@@ -101,25 +101,33 @@ fi
 echo DIAG_PIDS="$(echo $PIDS)"
 
 # --- 4. dump writable regions of each candidate, strings them ---
-# Default ($WIDE=0): [heap]+[stack] only (fast, and where the credential usually is).
-# $WIDE=1 (--wide): every ANONYMOUS rw-p region (no pathname or [bracket] tag) — catches
-# a credential in a malloc arena outside the main heap. Either way skip file-/device-
-# backed maps (reading /dev/... can BLOCK; file maps don't hold the runtime credential).
+# Scan [heap] + MAIN [stack] + anonymous malloc arenas (rw-p, EMPTY path): the IMS
+# credential lives in an anon arena on JCOW404/407, NOT in [heap]/[stack]. ALWAYS skip
+# per-thread stacks ([stack:TID]) and file/device maps. JUICE has dozens of 8 MB thread
+# stacks (~hundreds of MB, almost all zero); dumping them (the old $WIDE=1) fills the
+# ramfs /tmp and can wedge the ONT, which carries the landline. So there is no
+# "dump everything" mode: $WIDE no longer changes which regions are read. Guardrails:
+# refuse if free RAM is low, 16 MiB per-region cap, and nice(1) the dd.
+AVAIL=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null)
 : > /tmp/jfv-heap.bin
-for P in $PIDS; do
-  # match private-writable with OR without the exec bit — JioFiber ONT [heap] is `rwxp`
-  grep -E ' rw[-x]p ' /proc/$P/maps 2>/dev/null | while read L; do
-    path=$(echo "$L"|awk '{print $6}')
-    if [ "${WIDE:-0}" = "1" ]; then
-      case "$path" in "" | \[*\]) : ;; *) continue ;; esac
-    else
-      case "$path" in "[heap]" | "[stack]") : ;; *) continue ;; esac
-    fi
-    a=$(echo "$L"|cut -d- -f1); b=$(echo "$L"|cut -d' ' -f1|cut -d- -f2)
-    sp=$((0x$a/4096)); c=$(((0x$b-0x$a)/4096))
-    [ "$c" -gt 0 ] && [ "$c" -lt 24576 ] && dd if=/proc/$P/mem bs=4096 skip=$sp count=$c 2>/dev/null >> /tmp/jfv-heap.bin
+if [ -n "$AVAIL" ] && [ "$AVAIL" -lt 16384 ]; then
+  echo "MEM_LOW=$AVAIL — skipped memory dump to protect the ONT"
+else
+  for P in $PIDS; do
+    # match private-writable with OR without the exec bit — JioFiber ONT [heap] is `rwxp`
+    grep -E ' rw[-x]p ' /proc/$P/maps 2>/dev/null | while read L; do
+      path=$(echo "$L"|awk '{print $6}')
+      case "$path" in
+        "[heap]" | "[stack]" | "") : ;;   # heap, MAIN stack, anonymous arenas
+        *) continue ;;                     # skip [stack:TID] thread stacks, [vdso], file/dev maps
+      esac
+      a=$(echo "$L"|cut -d- -f1); b=$(echo "$L"|cut -d' ' -f1|cut -d- -f2)
+      sp=$((0x$a/4096)); c=$(((0x$b-0x$a)/4096))
+      [ "$c" -gt 4096 ] && c=4096
+      [ "$c" -gt 0 ] && nice -n 19 dd if=/proc/$P/mem bs=4096 skip=$sp count=$c 2>/dev/null >> /tmp/jfv-heap.bin
+    done
   done
-done
+fi
 echo STR_BEGIN
 strings /tmp/jfv-heap.bin 2>/dev/null | sort -u
 echo STR_END
@@ -232,9 +240,9 @@ def main():
                     help="print redacted AUTH lines, algorithm+realm per line, and token-count breakdown "
                          "(no secrets — nonce/response/cnonce are masked). Attach the output to a bug report.")
     ap.add_argument("--wide", action="store_true",
-                    help="dump ALL anonymous writable regions, not just [heap]+[stack] — try this if the "
-                         "default reports no match (slower on weak CPUs; the credential may live in a "
-                         "malloc arena outside the main heap on some firmwares).")
+                    help="deprecated / no-op for region selection: anonymous malloc arenas are now scanned "
+                         "by DEFAULT (that is where the credential lives), while per-thread stacks are always "
+                         "skipped to avoid OOMing the ONT. Kept only for backward compatibility.")
     a = ap.parse_args()
     # Resolve the password without leaving it in `ps`/shell history: positional arg
     # (convenient but visible), else JFV_ROUTER_PW env, else an interactive prompt.
