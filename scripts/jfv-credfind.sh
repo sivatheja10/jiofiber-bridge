@@ -183,7 +183,7 @@ echo "$CANDS" | while IFS= read -r C; do
   HA1=$(md5 "$UN:$REALM:$C")
   [ "$SESS" = 1 ] && HA1=$(md5 "$HA1:$NONCE:$CNONCE")
   if [ -n "$QOP" ]; then R=$(md5 "$HA1:$NONCE:$NC:$CNONCE:$QOP:$HA2"); else R=$(md5 "$HA1:$NONCE:$HA2"); fi
-  if [ "$R" = "$RESP" ]; then printf '%s' "$C" > "$HIT"; break; fi
+  if [ "$R" = "$RESP" ]; then putf "$C" > "$HIT"; break; fi   # putf, NOT printf — busybox may lack the printf applet (JCOW404)
 done
 if [ -s "$HIT" ]; then
   C=$(cat "$HIT"); rm -f "$HIT"
@@ -194,7 +194,7 @@ if [ -s "$HIT" ]; then
   echo ""; echo "Bridge env:  IMS_IMPI=$UN   IMS_PASSWORD=$C   SIP_REALM=$REALM"
   # Opt-in only: write plaintext to /tmp for scripting. Off by default so we don't leave
   # a live carrier credential on the disk. Set JFV_WRITE=1 if you want it.
-  [ "${JFV_WRITE:-0}" = "1" ] && { printf '%s\n' "$C" > /tmp/jfv-password.txt; echo "(also wrote /tmp/jfv-password.txt — delete when done)"; }
+  [ "${JFV_WRITE:-0}" = "1" ] && { echo "$C" > /tmp/jfv-password.txt; echo "(also wrote /tmp/jfv-password.txt — delete when done)"; }
   exit 0
 fi
 rm -f "$HIT"
