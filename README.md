@@ -195,6 +195,9 @@ commit the recovered secret** (`.gitignore` already keeps `*.env` out of git).
 
 Once you have that static credential you can register **directly to the IMS core (P-CSCF)**,
 bypassing JUICE entirely — the `DIRECT_IMS=1` option. See [`DIRECT-IMS.md`](DIRECT-IMS.md).
+Note that the core allows **one registration per line**: a direct registration **displaces the
+router's** rather than sitting alongside it, so use it as a replacement or standby, not
+together with JUICE.
 
 ---
 
@@ -298,6 +301,8 @@ Give phone 1 → `6001`, phone 2 → `6002` (both ring together on inbound; add 
 
 For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP port and the overlay, and route its alerts to the same ntfy topic.
 
+> **Blind spot:** the health check only proves the bridge is registered **to JUICE**. It can't see whether JUICE itself is still registered **upstream to the core**. If JUICE loses that, the bridge stays "healthy" while every call fails with an instant **`503 Service Unavailable`** that JUICE generates locally (see [Quirks](#quirks--gotchas)). Only a real test call catches this, for example to a toll-free number.
+
 ---
 
 ## Number formats, DTMF, caller-ID
@@ -326,6 +331,7 @@ For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP por
 - **Calls die at ~1–2 min** (`de-registration by user`, cause 500) = AMR `mode-set` not echoed. → AMR patch.
 - **Split-second outbound failures after many hours** (`PJ_ETOOSMALL`) = `contact_params` growing on each re-register. → contact_params guard patch.
 - **Outbound `PJ_ERESOLVE`** = set the outbound proxy to the router/registrar (the bridge does this).
+- **Every call fails instantly with `503 Service Unavailable` while the bridge shows registered** = JUICE has lost its **upstream** registration to the core. It still accepts LAN clients, but answers every INVITE itself; the 503 carries the router's `User-Agent: JCOW…/JUICEJFV…`. Restart the router's voice service or reboot the router, then restart the bridge. A common trigger is something else registering the same line directly to the core, which displaces JUICE (see [DIRECT-IMS.md → One registration per line](DIRECT-IMS.md#one-registration-per-line)).
 - **`484 Address Incomplete`** on mobiles = missing STD `0`. → dialplan normalization.
 - **One-way audio** = RTP bound to the wrong interface on a multi-homed box. The bridge is multi-homed (LAN + overlay); it pins `acc_jio` RTP to the **LAN** IP and `acc_trunk` RTP to the **overlay** IP. `register.sh` auto-detects the LAN IP with `ip -4 route get $ROUTER_IP`. Get this backwards and you get audio in exactly one direction.
 - **Phone never rings on inbound** even though outbound works = registered with only the `mmtel` feature tag. The core forks inbound only to contacts advertising the **full** RCS/MMTEL tag set **and** a JioCall-like `User-Agent`. → the bridge's `reg_contact_params`.

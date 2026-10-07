@@ -4,23 +4,58 @@ The default path (documented in the main README) registers the bridge to the
 router's on-box **JUICE** server, exactly as the router's own VoIP client does.
 This document describes the alternative: instead of registering to JUICE, the
 bridge registers **straight to Jio's IMS core** — the P-CSCF — over IPv6/TLS
-using a **static digest credential** recovered from your own router. It is more
-robust than the JUICE path (no rotating local password, no device whitelist to
-satisfy, and no dependence on JUICE the software at all), but it is a bigger
-step, it talks to a live carrier core, and it *still* requires a device sitting
-on the Jio LAN. Enable it with `DIRECT_IMS=1`.
+using a **static digest credential** recovered from your own router. It removes
+the rotating local password, the device whitelist and the dependence on JUICE
+the software, but it is a bigger step, it talks to a live carrier core, it
+*still* requires a device on the Jio LAN, and it **competes with the router for
+the line's single registration** (next section). Enable it with `DIRECT_IMS=1`.
 
 > **Scope & safety — read first.**
 > - Use this **only on your own line**. The digest credential is *yours*,
 >   recovered from *your* router — nobody else's.
-> - Registrations are **additive**: the bridge registers a distinct
->   `+sip.instance` that **coexists** with the router's own registration, so the
->   physical landline keeps working. During testing, actively **verify the
->   router's own `:5061` connection stays up** (see the last section).
+> - **Registrations are NOT additive.** The core keeps **one** registration per
+>   line. Registering directly **displaces the router's own registration**, and
+>   the router re-registers and displaces yours. See
+>   [One registration per line](#one-registration-per-line) before enabling this.
 > - You are talking to a **live carrier IMS core**. Go slowly, change one thing
 >   at a time, and don't hammer REGISTER.
 > - **Never commit or share the recovered password.** Keep it out of git and out
 >   of any pasted logs.
+
+## One registration per line
+
+An earlier version of this document said the direct registration "coexists"
+with the router's. **That was wrong.** It was measured at moments when the
+router's registration had already died, so only one binding existed at a time.
+
+What actually happens:
+
+- The core keeps **one contact per line**. Every device shares the line's single
+  private identity (IMPI), and the core doesn't run the RFC 5626 / 3GPP
+  "multiple registrations" mechanism: it accepts `reg-id` and `Supported: outbound`
+  but never answers with `Require: outbound`. In practice a new contact from the
+  same IMPI **replaces** the previous one, which matches the single-registration
+  rule in 3GPP TS 24.229 §5.4.1.2.2. A distinct `+sip.instance` doesn't help.
+- When the bridge registers, the router's JUICE receives a reg-event `NOTIFY`
+  with its contact `state="terminated" event="rejected"`, and it normally
+  re-registers within about a second. **That displaces the bridge.** The bridge
+  isn't subscribed to reg-event, so it keeps believing its `200 OK`, and every
+  outbound INVITE gets **`403 Forbidden - 10009`** from the P-CSCF within about
+  10 ms, with no `100 Trying`.
+- **Only the most recent registrant can place calls.** Whichever device holds
+  the binding also receives inbound calls (JUICE passes them on to its LAN
+  clients).
+- **Running both is fragile.** Each bridge re-REGISTER (hourly with
+  `IMS_REG_EXPIRES=3600`) knocks the router off. If JUICE ever fails to
+  re-register, it may not retry at all; we saw it stay dead for six days. Every
+  call through the router (and through the default JUICE-mode bridge) then fails
+  with an instant local **`503 Service Unavailable`**.
+
+**Use direct mode as a replacement or a cold standby, not alongside JUICE.**
+Run the default JUICE path, and start `DIRECT_IMS=1` only while JUICE has
+confirmed lost its upstream registration. Jio's own multi-device design works
+the same way: JioJoin, the set-top box and LAN softphones all register to JUICE,
+which holds the one upstream registration.
 
 ## What it does and does NOT give you
 
@@ -133,7 +168,7 @@ Each row is a hard-won requirement; omit it and you get the failure named.
 
 | Requirement | Why it matters — the failure if omitted |
 |---|---|
-| `+u.jio.jfv;q=0.5` in the REGISTER `Contact` | **Authorizes OUTBOUND.** Without it the core classes the binding as RCS/video and returns **`403-10009`** on every outbound INVITE. *(The key discovery.)* |
+| `+u.jio.jfv;q=0.5` in the REGISTER `Contact` | The router's own capability tag; advertise it the same way. We originally credited it with fixing **`403-10009`** on outbound, but that test predates the [one-registration](#one-registration-per-line) finding, so a displaced registration may have been the real cause. Keep it either way. |
 | Initial REGISTER carries a **typed** empty-auth header (pjsip `auth_pref.initial_auth`, realm set **specifically**, not `*`) | Without it the core returns **`483 Too Many Hops`**. Do **not** hand-add an empty `Authorization` header — it gets duplicated on the 401 retry and causes a **401 loop**. |
 | `Expires >= 3600` | Else **`423 Interval Too Brief`**. |
 | **10 s** TLS/TCP keepalive | The core/NAT drops an idle flow at ~15–20 s. The result is a **"ghost" registration**: 200 OK'd but refuses calls. This is the master fix for "registered but no calls". |
@@ -148,7 +183,8 @@ Each row is a hard-won requirement; omit it and you get the failure named.
 | `483 Too Many Hops` | Missing **typed initial-auth** (`IMS_INIT` / `auth_pref.initial_auth`). |
 | `423 Interval Too Brief` | `Expires` < 3600 — raise `IMS_REG_EXPIRES`. |
 | `401` | **Normal** challenge; answered by the digest. |
-| `403-10009` (on outbound) | Missing `+u.jio.jfv` on the REGISTER `Contact`. |
+| `403-10009` (on outbound, within ~10 ms, no `100 Trying`) | **Your registration has been displaced**, almost always by the router's JUICE re-registering ([one registration per line](#one-registration-per-line)). Less likely: `+u.jio.jfv` is missing from the REGISTER `Contact`. |
+| `503 Service Unavailable` with `User-Agent: JCOW…/JUICEJFV…` (JUICE mode) | Generated **locally** by the router: JUICE has lost its upstream registration. Restart the router's voice service, or reboot the router. |
 | `200 OK` (with `P-Associated-URI`) | **Registered.** |
 | `481` (on de-REGISTER) | Reused the register's nonce — get a fresh challenge, or just let it expire. |
 | `480` (on outbound) | Wrong number format. Dial **`91` + national number** with **no leading `+`**; toll-free `1800…` works as-is. |
@@ -157,11 +193,12 @@ Each row is a hard-won requirement; omit it and you get the failure named.
 
 You have a good registration when:
 - the log shows **`>>> acc=0 REG status=200 OK`**, and the `200` carries a
-  **`P-Associated-URI`**; and
-- the **router's own `:5061` connection stays `ESTABLISHED`** — the two
-  registrations coexist. Check with `ss -tnp` (or your router's status page)
-  while your bridge is registered.
+  **`P-Associated-URI`**.
 
-The real proof is a **live call**: place and answer one, confirm **audio both
-ways**, and confirm it does **not drop at ~30 s**. That single test exercises
-the transport-pinning and IPv6-media requirements above.
+A `200 OK` doesn't prove you still hold the binding, and the router having a
+TLS connection to the core only shows the router is connected, not which of you
+holds the line. The real proof is a **live call**: place and
+answer one, confirm **audio both ways**, and confirm it does **not drop at
+~30 s**. That single test exercises the transport-pinning and IPv6-media
+requirements above. If it gets `403-10009` right after a good registration, the
+router has taken the line back.
