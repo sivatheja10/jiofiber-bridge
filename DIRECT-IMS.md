@@ -202,3 +202,32 @@ answer one, confirm **audio both ways**, and confirm it does **not drop at
 ~30 s**. That single test exercises the transport-pinning and IPv6-media
 requirements above. If it gets `403-10009` right after a good registration, the
 router has taken the line back.
+
+## Self-heal in direct mode
+
+`scripts/healthcheck.sh` is **mode-aware**: with `DIRECT_IMS=1` it watches for an established
+TLS flow to `[PCSCF_V6]:PCSCF_PORT` (the direct P-CSCF leg) instead of the router's `:5068`, and
+restarts the bridge if that flow is gone. Set the same `DIRECT_IMS` / `PCSCF_V6` / `PCSCF_PORT`
+in `bridge.env` that the bridge uses; wire it with the shipped `jiofiber-health.timer` exactly as
+in the main README's monitoring step. A `200 OK` alone is not proof the line is yours (see above),
+so treat the health check as liveness of the *flow*, and a periodic test call as liveness of the
+*binding*.
+
+## What we measured (so you know what to expect)
+
+Confirmed on a live line with controlled tests:
+
+- **Direct outbound works** — a direct registration that is the most recent one for the number
+  places calls fine (`200 OK`, two-way audio). The `+u.jio.jfv` capability tag on the REGISTER
+  `Contact` is required.
+- **Direct and the router's JUICE evict each other.** The core keeps one registration per line
+  (it does not honour RFC 5626 outbound — it never returns `Require: outbound`). Whoever registered
+  last can call; the other gets `403-10009` on every outbound INVITE. There is no header or
+  instance trick that makes both originate at once — this was tested to exhaustion.
+- **The eviction is survivable but occasionally fatal to JUICE.** When the bridge registers, the
+  router's JUICE is told its contact was terminated and normally re-registers within ~1 s. Most
+  cycles recover; a minority leave JUICE wedged with no upstream registration until it is
+  restarted, during which the router answers every call with a local `503`. So **do not run a
+  direct bridge alongside the router's JUICE long-term** — use direct mode either as a full
+  replacement (you don't rely on the physical line port / other LAN handsets) or as a cold standby
+  you start only when JUICE is confirmed down.
