@@ -1,19 +1,25 @@
-# pjproject patches for JioFiber JUICE
+# pjproject patch for JioFiber JUICE — AMR mode-set
 #
-# Apply on top of JFC-pjproject (github.com/JFC-Group/JFC-pjproject), which already
-# carries the 3 rfc5626 instance-id commits. These 3 additional patches are what make
-# calls actually stable on JUICE. Apply with:  git apply pjproject-jiofiber.patch
+# Apply on top of JFC-pjproject (github.com/JFC-Group/JFC-pjproject), branch
+# jfc-rustone-2.17, at commit bf04f99c0 or later. Apply with:
+#   git apply pjproject-jiofiber.patch
 #
-# 1) opencore_amr.c: advertise the AMR `mode-set` in our SDP answer. JUICE fires mid-call
-#    re-INVITEs demanding mode-set be echoed; without this, calls drop after ~1-2 min with
-#    a misleading "Session released - due to de-registration by user" (cause=500).
+# That base branch already carries the two RFC 5626 instance-id fixes this patch
+# used to include, so only the AMR hunk remains here:
 #
-# 2) pjsua_acc.c init_outbound_setting: use the `<00000000-0000-1000-8000-0000XXXXXXXX>`
-#    instance-id shape JUICE expects (matches the router's uuid_value).
+#   * +sip.instance UUID shape `<00000000-0000-1000-8000-0000XXXXXXXX>` — now
+#     upstream in JFC-pjproject commit 507e1e3a3 (was our hunk #2).
+#   * contact_params instance-id accumulation / PJ_ETOOSMALL after N calls — now
+#     upstream in JFC-pjproject commit bf04f99c0 (was our hunk #3). Their fix is
+#     more complete than our old guard: it appends the instprm when each Contact
+#     is built via a helper (acc_contact_instprm) instead of mutating
+#     acc->cfg.contact_params, which also fixes a per-call acc->pool leak and the
+#     param leaking into UAS/rewritten Contacts.
 #
-# 3) pjsua_acc.c pjsua_acc_create_uac_contact: GUARD the rfc5626 instprm append. Without the
-#    guard it re-appends to contact_params on EVERY outbound call, growing the Contact header
-#    until it overflows (PJ_ETOOSMALL) and outbound fails after N calls.
+# 1) opencore_amr.c: advertise the AMR `mode-set` in our SDP answer. JUICE fires
+#    mid-call re-INVITEs demanding mode-set be echoed; without this, calls drop
+#    after ~1-2 min with a misleading "Session released - due to de-registration
+#    by user" (cause=500). Not upstream — still required.
 
 diff --git a/pjmedia/src/pjmedia-codec/opencore_amr.c b/pjmedia/src/pjmedia-codec/opencore_amr.c
 --- a/pjmedia/src/pjmedia-codec/opencore_amr.c
@@ -33,26 +39,3 @@ diff --git a/pjmedia/src/pjmedia-codec/opencore_amr.c b/pjmedia/src/pjmedia-code
      }
 
      /* Default all other flag bits disabled. */
-
-diff --git a/pjsip/src/pjsua-lib/pjsua_acc.c b/pjsip/src/pjsua-lib/pjsua_acc.c
---- a/pjsip/src/pjsua-lib/pjsua_acc.c
-+++ b/pjsip/src/pjsua-lib/pjsua_acc.c
-@@ -173,7 +173,7 @@ static void init_outbound_setting(pjsua_acc *acc)
-         const pj_str_t *hostname;
-         pj_uint32_t hval;
-         pj_size_t pos;
--        char instprm[] = ";+sip.instance=\"<00000000-0000-0000-0000-0000CCDDEEFF>\"";
-+        char instprm[] = ";+sip.instance=\"<00000000-0000-1000-8000-0000CCDDEEFF>\"";
-
-         hostname = pj_gethostname();
-         pos = pj_ansi_strlen(instprm) - 10;
-@@ -3833,7 +3833,8 @@ PJ_DEF(pj_status_t) pjsua_acc_create_uac_contact( pj_pool_t *pool,
-         transport_param[0] = '\0';
-     }
-
--    if (acc->cfg.use_rfc5626) {
-+    if (acc->cfg.use_rfc5626 &&
-+        pj_strstr(&acc->cfg.contact_params, &acc->rfc5626_instprm)==NULL) {
-         pj_ssize_t new_len;
-         pj_str_t new_prm;
-

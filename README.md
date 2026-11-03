@@ -68,7 +68,7 @@ Why split it? The home end has a dynamic residential IP and can't safely expose 
 ## The three hard problems
 
 **1. Identity — the IMS core only talks to a "known" device.**
-JUICE registration uses RFC 5626 outbound with a `+sip.instance` that Jio expects in a very specific shape (`<00000000-0000-1000-8000-0000XXXXXXXX>`, uppercase, **no** `urn:uuid:` prefix), plus a rotating per-device password and a device that has been **whitelisted** against your account via an OTP flow. Stock pjsua formats the instance differently and the core **silently drops** the REGISTER — no error, just nothing. Fixed by [a pjproject patch](patches/pjproject-jiofiber.patch) and the [provisioning step](#step-3--provision-the-device-whitelist--password).
+JUICE registration uses RFC 5626 outbound with a `+sip.instance` that Jio expects in a very specific shape (`<00000000-0000-1000-8000-0000XXXXXXXX>`, uppercase, **no** `urn:uuid:` prefix), plus a rotating per-device password and a device that has been **whitelisted** against your account via an OTP flow. Stock pjsua formats the instance differently and the core **silently drops** the REGISTER — no error, just nothing. JFC-pjproject's instance-id fixes (commits `507e1e3a3` + `bf04f99c0`) emit the shape Jio wants; pair them with the [provisioning step](#step-3--provision-the-device-whitelist--password).
 
 **2. Media — AMR must be negotiated *and echoed correctly* or calls die at ~1–2 min.**
 The core offers AMR/AMR-WB with a `mode-set` and expects you to advertise AMR in your SDP with a matching `mode-set`. If you accept the call but don't echo `mode-set` back, audio flows for a minute or two and then the core tears the call down (`de-registration by user`, cause 500). Fixed in the [AMR patch](patches/pjproject-jiofiber.patch). One-way audio is a *separate* problem — see [multi-homed RTP](#quirks--gotchas).
@@ -94,7 +94,7 @@ This is the one nobody documents. On an incoming call the IMS core forks INVITEs
 
 ```
 b2bua/jio_b2bua.c            The B2BUA. Reads identity from env; args are the secrets/IPs.
-patches/pjproject-jiofiber.patch   3 patches: AMR mode-set, +sip.instance format, contact_params guard.
+patches/pjproject-jiofiber.patch   AMR mode-set patch (the +sip.instance + contact_params fixes are now upstream in JFC-pjproject).
 patches/config_site.h        pjproject build config (AMR NB/WB on, video off).
 bridge.env.example           Copy to bridge.env and fill in. Sourced by the scripts.
 DIRECT-IMS.md                Advanced: register straight to the P-CSCF (DIRECT_IMS=1), bypassing JUICE.
@@ -113,11 +113,12 @@ systemd/jiofiber-health.*    Timer that runs the health check every 2 min.
 
 ## Step 1 — Build the patched pjproject
 
-The bridge links against pjproject with three source patches. Stock pjproject will *not* register to Jio.
+The bridge links against **JFC-pjproject** (branch `jfc-rustone-2.17`), which already carries the RFC 5626 `+sip.instance` fixes Jio needs, plus one source patch of our own — the AMR `mode-set`. Stock pjproject will *not* register to Jio.
 
 ```bash
-git clone https://github.com/pjsip/pjproject
-cd pjproject
+# JFC-pjproject's jfc-rustone-2.17 branch (@ bf04f99c0 or later) has the +sip.instance fixes.
+git clone -b jfc-rustone-2.17 https://github.com/JFC-Group/JFC-pjproject
+cd JFC-pjproject
 git apply /path/to/jiofiber-bridge/patches/pjproject-jiofiber.patch
 cp /path/to/jiofiber-bridge/patches/config_site.h pjlib/include/pj/config_site.h
 
@@ -130,11 +131,14 @@ make -C pjsip-apps/build samples
 # Binary lands in pjsip-apps/bin/samples/<target-triple>/jio_b2bua
 ```
 
-What the patches do (see the file for the exact diffs):
+What the patch does (see the file for the exact diff):
 
-- **AMR `mode-set` advertise** (`pjmedia .../opencore_amr.c`): puts a `mode-set` back into the SDP fmtp (NB `0,1,2,3,4,5,6,7`, WB adds `8`). Without this, calls drop after ~1–2 min.
-- **`+sip.instance` format** (`pjsip/.../pjsua_acc.c`): emits the instance as `<00000000-0000-1000-8000-0000XXXXXXXX>` — the shape Jio requires. Without this, REGISTER is silently dropped.
-- **`contact_params` accumulation guard** (`pjsua_acc.c`): stops the RFC 5626 instance param being appended on every re-register, which after many hours produces `PJ_ETOOSMALL` and split-second outbound failures.
+- **AMR `mode-set` advertise** (`pjmedia .../opencore_amr.c`): puts a `mode-set` back into the SDP fmtp (NB `0,1,2,3,4,5,6,7`, WB adds `8`). Without this, calls drop after ~1–2 min. This is the only patch still carried here.
+
+Two fixes that used to live in this patch are now upstream in JFC-pjproject, so the clone above already has them:
+
+- **`+sip.instance` format** (`pjsua_acc.c`, JFC-pjproject `507e1e3a3`): emits the instance as `<00000000-0000-1000-8000-0000XXXXXXXX>` — the shape Jio requires. Without this, REGISTER is silently dropped.
+- **`contact_params` accumulation fix** (`pjsua_acc.c`, JFC-pjproject `bf04f99c0`): stops the RFC 5626 instance param being appended on every re-register (which after many hours produces `PJ_ETOOSMALL` and split-second outbound failures). Their version appends the param per-Contact via a helper instead of mutating the config, which also fixes a per-call pool leak.
 
 ---
 
@@ -327,9 +331,9 @@ For a dashboard, point [Gatus](https://github.com/TwiN/gatus) at the VPS SIP por
 
 ## Quirks & gotchas
 
-- **Silent REGISTER drop** = wrong `+sip.instance` format. Must be `<00000000-0000-1000-8000-0000XXXXXXXX>`, uppercase, no `urn:uuid:`. → instance patch.
+- **Silent REGISTER drop** = wrong `+sip.instance` format. Must be `<00000000-0000-1000-8000-0000XXXXXXXX>`, uppercase, no `urn:uuid:`. → JFC-pjproject instance-id fix (`507e1e3a3`).
 - **Calls die at ~1–2 min** (`de-registration by user`, cause 500) = AMR `mode-set` not echoed. → AMR patch.
-- **Split-second outbound failures after many hours** (`PJ_ETOOSMALL`) = `contact_params` growing on each re-register. → contact_params guard patch.
+- **Split-second outbound failures after many hours** (`PJ_ETOOSMALL`) = `contact_params` growing on each re-register. → JFC-pjproject contact_params fix (`bf04f99c0`).
 - **Outbound `PJ_ERESOLVE`** = set the outbound proxy to the router/registrar (the bridge does this).
 - **Every call fails instantly with `503 Service Unavailable` while the bridge shows registered** = JUICE has lost its **upstream** registration to the core. It still accepts LAN clients, but answers every INVITE itself; the 503 carries the router's `User-Agent: JCOW…/JUICEJFV…`. Restart the router's voice service or reboot the router, then restart the bridge. A common trigger is something else registering the same line directly to the core, which displaces JUICE (see [DIRECT-IMS.md → One registration per line](DIRECT-IMS.md#one-registration-per-line)).
 - **`484 Address Incomplete`** on mobiles = missing STD `0`. → dialplan normalization.
