@@ -102,6 +102,7 @@ scripts/register.sh          Sets device hostname, fetches the rotating password
 scripts/healthcheck.sh       Verifies the TLS reg is up; restarts + alerts on failure.
 scripts/jfv-credfind.py      Recover+VERIFY your line's IMS SIP digest password (from your PC). See scripts/CREDENTIAL-RECOVERY.md.
 scripts/jfv-credfind.sh      Same, but runs on the router (busybox). Own line only.
+scripts/jtc-whitelist-check.sh  Early warning: exits non-zero (and can ntfy) if the router's JTCAutoWhitelist flag leaves "true" — i.e. the no-OTP cred path is about to break. Cron/timer it.
 asterisk/pjsip.conf          Your phones (6001/6002) + the static trunk to the bridge.
 asterisk/extensions.conf     Number normalization (out) + ring-all with caller-ID (in).
 asterisk/rtp.conf            RTP port range.
