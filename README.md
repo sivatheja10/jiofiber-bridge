@@ -172,6 +172,8 @@ The bridge auto-detects which LAN IP to bind RTP to (`ip -4 route get $ROUTER_IP
 
 The IMS core will only accept a device that your account has explicitly added, and the device password **rotates every time you fetch it**. So provisioning is: (a) add the device with a one-time OTP, (b) always fetch the *current* password right before you register.
 
+The provisioning helper is **`jfc_configure.py`** from [JFC-Group/JFC-SIP-Configuration-Tool](https://github.com/JFC-Group/JFC-SIP-Configuration-Tool) — it derives the device MAC/instance from the hostname and talks to the router's HTTPS provisioning service (`:8443`). Point `JFC` (in `bridge.env`) at your copy. It runs the OTP add-device flow, and with `--no-otp` (`nwk_intf=eth`) fetches rotating credentials without an OTP — which works only while the line's router reports `JTCAutoWhitelist=true` (the default on JioFiber JFV lines).
+
 1. **Pick a stable device identity** (`DEVICE_HOST`, e.g. `homebridge01`). The bridge runs under `unshare --uts` and sets this as the process's hostname — the IMS provisioning ties the whitelist to that identity **without** changing your host machine's real hostname.
 2. **Trigger the add-device OTP** from your provider's app/flow for your number. For Jio this is the JioCall / JFC provisioning path; you'll receive an OTP by SMS.
 3. **Run the provisioning helper with `op_type=add`** and the OTP to whitelist `DEVICE_HOST`. (`scripts/register.sh` calls the same helper with `-l 5` to *fetch* the current password on every start; the add is a one-time variant of that call.)
@@ -376,8 +378,8 @@ Most "it worked yesterday, `403` today" cases are a password that rotated becaus
 
 This project stands on the shoulders of prior reverse-engineering and open-source telephony work. Huge thanks to:
 
-- **[JFC-Group](https://github.com/JFC-Group)** — the community that first mapped out how JioFiber's JUICE/IMS client provisions and registers. In particular **[JFC-microsip](https://github.com/JFC-Group/JFC-microsip)** (the provisioning/config flow that `jfc_configure.py` derives from) and the JFC pjproject work that proved the patch path. Without their groundwork the `+sip.instance` shape, the OTP whitelist flow, and the rotating-password behaviour would have stayed a black box.
-- **[pjproject / PJSIP](https://github.com/pjsip/pjproject)** — the SIP/media stack the B2BUA is built on; the three patches here are small deltas against it.
+- **[JFC-Group](https://github.com/JFC-Group)** — the community that first mapped out how JioFiber's JUICE/IMS client provisions and registers. In particular **[JFC-SIP-Configuration-Tool](https://github.com/JFC-Group/JFC-SIP-Configuration-Tool)** (home of `jfc_configure.py`), **[JFC-microsip](https://github.com/JFC-Group/JFC-microsip)** (the MicroSIP build the provisioning/config flow targets), and the **[JFC-pjproject](https://github.com/JFC-Group/JFC-pjproject)** work that proved the patch path. Without their groundwork the `+sip.instance` shape, the OTP whitelist flow, and the rotating-password behaviour would have stayed a black box.
+- **[pjproject / PJSIP](https://github.com/pjsip/pjproject)** — the SIP/media stack the B2BUA is built on; the AMR patch here is a small delta against it (two more fixes are upstream in JFC-pjproject).
 - **[opencore-amr](https://sourceforge.net/projects/opencore-amr/)** — the AMR-NB/AMR-WB codec that makes IMS audio interoperate with plain PCMU.
 - **[Asterisk](https://www.asterisk.org/)** — the public registrar / dialplan front end for the phones.
 - **[Tailscale](https://tailscale.com)** / **[WireGuard](https://www.wireguard.com/)**, **[ntfy](https://ntfy.sh)**, and **[Gatus](https://github.com/TwiN/gatus)** — the overlay, alerting, and monitoring glue.
